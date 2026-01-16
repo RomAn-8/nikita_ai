@@ -1,21 +1,111 @@
 import json
 import re
+import sqlite3
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from telegram import Update, BotCommand
-from telegram.error import TimedOut
+from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
 from .config import TELEGRAM_BOT_TOKEN
 from .openrouter import chat_completion
 
+logger = logging.getLogger(__name__)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-# ---------- PROMPTS ----------
+# -------------------- SQLITE MEMORY --------------------
+
+DB_PATH = Path(__file__).resolve().parent / "bot_memory.sqlite3"
+MEMORY_LIMIT_MESSAGES = 30  # сколько последних сообщений хранить в контексте для LLM
+MEMORY_CHAT_MODES = ("text", "thinking", "experts")  # общая память между этими режимами
+
+
+def open_db() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    # меньше "database is locked" при параллельных апдейтах
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
+
+
+def init_db() -> None:
+    with open_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              chat_id INTEGER NOT NULL,
+              mode TEXT NOT NULL,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages(chat_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_mode_id ON messages(chat_id, mode, id)")
+        conn.commit()
+
+
+def db_add_message(chat_id: int, mode: str, role: str, content: str) -> None:
+    content = (content or "").strip()
+    if not content:
+        return
+    try:
+        with open_db() as conn:
+            conn.execute(
+                "INSERT INTO messages(chat_id, mode, role, content, created_at) VALUES(?,?,?,?,?)",
+                (int(chat_id), str(mode), str(role), content, utc_now_iso()),
+            )
+            conn.commit()
+    except Exception as e:
+        # память не должна "ронять" бота
+        logger.exception("DB add failed: %s", e)
+
+
+def db_get_history(chat_id: int, modes: tuple[str, ...], limit: int) -> list[dict]:
+    placeholders = ",".join(["?"] * len(modes))
+    sql = f"""
+        SELECT role, content
+        FROM messages
+        WHERE chat_id = ? AND mode IN ({placeholders})
+        ORDER BY id DESC
+        LIMIT ?
+    """
+    try:
+        with open_db() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(sql, (int(chat_id), *modes, int(limit)))
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.exception("DB read failed: %s", e)
+        return []
+
+    rows = list(reversed(rows))
+    out: list[dict] = []
+    for r in rows:
+        role = (r["role"] or "").strip()
+        content = (r["content"] or "").strip()
+        if role in ("user", "assistant") and content:
+            out.append({"role": role, "content": content})
+    return out
+
+
+def build_messages_with_db_memory(system_prompt: str, chat_id: int) -> list[dict]:
+    history = db_get_history(chat_id=chat_id, modes=MEMORY_CHAT_MODES, limit=MEMORY_LIMIT_MESSAGES)
+    return [{"role": "system", "content": system_prompt}] + history
+
+
+# -------------------- PROMPTS --------------------
 
 SYSTEM_PROMPT_JSON = """
 Всегда отвечай строго одним валидным JSON-объектом. Никакого текста вне JSON. Никакого markdown.
@@ -118,7 +208,6 @@ SYSTEM_PROMPT_FOREST = """
 - До финала "FINAL" не писать.
 """
 
-# Новый режим: "решай пошагово"
 SYSTEM_PROMPT_THINKING = """
 Ты решаешь задачи в режиме "пошаговое рассуждение".
 Правила:
@@ -127,7 +216,6 @@ SYSTEM_PROMPT_THINKING = """
 - Пиши понятно и без воды.
 """
 
-# Новый режим: "группа экспертов"
 SYSTEM_PROMPT_EXPERTS = """
 Ты решаешь задачу как "группа экспертов" внутри одного ответа.
 
@@ -155,7 +243,62 @@ SYSTEM_PROMPT_EXPERTS = """
 """
 
 
-# ---------- HELPERS ----------
+# -------------------- HELPERS --------------------
+
+TELEGRAM_MESSAGE_LIMIT = 3900  # безопаснее 4096
+
+
+def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """
+    Режем длинные сообщения на части, стараясь резать по переносам строк.
+    """
+    t = (text or "").strip()
+    if not t:
+        return [""]
+
+    if len(t) <= limit:
+        return [t]
+
+    parts: list[str] = []
+    cur = t
+    while len(cur) > limit:
+        cut = cur.rfind("\n", 0, limit)
+        if cut < 200:  # если нет нормального переноса, режем тупо
+            cut = limit
+        parts.append(cur[:cut].rstrip())
+        cur = cur[cut:].lstrip()
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+async def safe_reply_text(update: Update, text: str) -> None:
+    """
+    Безопасная отправка: не падаем на TimedOut/BadRequest(Message is too long).
+    """
+    if not update.message:
+        return
+
+    chunks = split_telegram_text(text)
+    for ch in chunks:
+        try:
+            await update.message.reply_text(ch)
+        except TimedOut:
+            return
+        except BadRequest as e:
+            # если вдруг всё равно "too long" — режем ещё сильнее
+            msg = str(e).lower()
+            if "message is too long" in msg and len(ch) > 500:
+                for sub in split_telegram_text(ch, limit=2000):
+                    try:
+                        await update.message.reply_text(sub)
+                    except Exception:
+                        return
+                continue
+            return
+        except Exception:
+            return
+
 
 def extract_json_object(text: str) -> str:
     text = (text or "").strip()
@@ -217,14 +360,6 @@ def get_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
     return context.user_data.get("mode", "text")
 
 
-async def safe_reply_text(update: Update, text: str) -> None:
-    try:
-        if update.message:
-            await update.message.reply_text(text)
-    except TimedOut:
-        return
-
-
 def looks_like_json(text: str) -> bool:
     t = (text or "").lstrip()
     return (t.startswith("{") and t.endswith("}")) or t.startswith("{")
@@ -263,7 +398,7 @@ def reset_forest(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("forest_result", None)
 
 
-# ---------- COMMANDS ----------
+# -------------------- COMMANDS --------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     mode = get_mode(context)
@@ -339,21 +474,20 @@ async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["tz_history"] = []
     context.user_data["tz_questions"] = 0
     context.user_data["tz_done"] = False
-
     reset_forest(context)
 
-    first = chat_completion([
+    first = (chat_completion([
         {"role": "system", "content": SYSTEM_PROMPT_TZ},
         {"role": "user", "content": "Начни. Задай первый вопрос, чтобы собрать требования для ТЗ на создание сайта."},
-    ]) or ""
+    ]) or "").strip()
 
     if looks_like_json(first):
         await send_final_tz_json(update, context, first)
         return
 
     context.user_data["tz_questions"] = 1
-    context.user_data["tz_history"].append({"role": "assistant", "content": first.strip()})
-    await safe_reply_text(update, first.strip())
+    context.user_data["tz_history"].append({"role": "assistant", "content": first})
+    await safe_reply_text(update, first)
 
 
 async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -362,20 +496,19 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["forest_questions"] = 0
     context.user_data["forest_done"] = False
     context.user_data.pop("forest_result", None)
-
     reset_tz(context)
 
-    first = chat_completion([
+    first = (chat_completion([
         {"role": "system", "content": SYSTEM_PROMPT_FOREST},
         {"role": "user", "content": "Начни. Задай первый вопрос для расчёта кто кому сколько должен."},
-    ]) or ""
+    ]) or "").strip()
 
     context.user_data["forest_questions"] = 1
-    context.user_data["forest_history"].append({"role": "assistant", "content": first.strip()})
-    await safe_reply_text(update, first.strip())
+    context.user_data["forest_history"].append({"role": "assistant", "content": first})
+    await safe_reply_text(update, first)
 
 
-# ---------- TZ FLOW ----------
+# -------------------- TZ FLOW --------------------
 
 async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str) -> None:
     try:
@@ -421,7 +554,6 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT_TZ}]
     messages.extend(history)
-
     if force_finalize:
         messages.append({"role": "user", "content": "Сформируй финальное ТЗ прямо сейчас. Верни только JSON по схеме."})
 
@@ -441,7 +573,7 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await safe_reply_text(update, raw)
 
 
-# ---------- FOREST FLOW ----------
+# -------------------- FOREST FLOW --------------------
 
 async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str) -> None:
     if context.user_data.get("forest_done"):
@@ -464,7 +596,6 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT_FOREST}]
     messages.extend(history)
-
     if force_finalize:
         messages.append({
             "role": "user",
@@ -500,9 +631,12 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
     await safe_reply_text(update, raw)
 
 
-# ---------- MAIN TEXT HANDLER ----------
+# -------------------- MAIN TEXT HANDLER --------------------
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     text = (update.message.text or "").strip()
     if not text:
         return
@@ -510,6 +644,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.chat.send_action("typing")
 
     mode = get_mode(context)
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
 
     if mode == "tz":
         await handle_tz_message(update, context, text)
@@ -519,50 +654,40 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_forest_message(update, context, text)
         return
 
-    if mode == "thinking":
-        try:
-            answer = chat_completion([
-                {"role": "system", "content": SYSTEM_PROMPT_THINKING},
-                {"role": "user", "content": text},
-            ])
-        except Exception as e:
-            await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
-            return
-        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
-        return
+    # ---- CHAT MODES WITH SQLITE MEMORY ----
+    if mode in ("text", "thinking", "experts"):
+        if mode == "thinking":
+            system_prompt = SYSTEM_PROMPT_THINKING
+        elif mode == "experts":
+            system_prompt = SYSTEM_PROMPT_EXPERTS
+        else:
+            system_prompt = SYSTEM_PROMPT_TEXT
 
-    if mode == "experts":
-        try:
-            answer = chat_completion([
-                {"role": "system", "content": SYSTEM_PROMPT_EXPERTS},
-                {"role": "user", "content": text},
-            ])
-        except Exception as e:
-            await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
-            return
-        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
-        return
+        messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+        messages.append({"role": "user", "content": text})
 
-    if mode == "text":
         try:
-            answer = chat_completion([
-                {"role": "system", "content": SYSTEM_PROMPT_TEXT},
-                {"role": "user", "content": text},
-            ])
+            answer = (chat_completion(messages) or "").strip()
         except Exception as e:
             await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
             return
 
-        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
+        answer = answer or "Пустой ответ от модели."
+
+        # сохраняем в память (общая память для text/thinking/experts через выборку MEMORY_CHAT_MODES)
+        db_add_message(chat_id, mode, "user", text)
+        db_add_message(chat_id, mode, "assistant", answer)
+
+        await safe_reply_text(update, answer)
         return
 
-    # mode == "json": JSON на каждое сообщение
+    # ---- JSON MODE (без памяти) ----
     raw = ""
     try:
         raw = chat_completion([
             {"role": "system", "content": SYSTEM_PROMPT_JSON},
             {"role": "user", "content": text},
-        ])
+        ]) or ""
 
         json_str = extract_json_object(raw)
         data = json.loads(json_str)
@@ -592,7 +717,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-# ---------- BOT COMMANDS MENU (slash suggestions) ----------
+# -------------------- ERROR HANDLER --------------------
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # чтобы не было "No error handlers are registered"
+    logger.exception("Unhandled error: %s", context.error)
+    if isinstance(update, Update) and update.message:
+        await safe_reply_text(update, f"Внутренняя ошибка: {type(context.error).__name__}: {context.error}")
+
+
+# -------------------- BOT COMMANDS MENU --------------------
 
 async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
@@ -608,6 +742,8 @@ async def post_init(app: Application) -> None:
 
 
 def run() -> None:
+    init_db()
+
     request = HTTPXRequest(
         connect_timeout=20.0,
         read_timeout=60.0,
@@ -622,6 +758,8 @@ def run() -> None:
         .post_init(post_init)
         .build()
     )
+
+    app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
