@@ -57,7 +57,7 @@ SYSTEM_PROMPT_TZ = """
   "title": "ТЗ на создание сайта",
   "time": "",
   "tag": "tz_site",
-  "answer": "", 
+  "answer": "",
   "steps": [],
   "warnings": [],
   "need_clarification": false,
@@ -72,9 +72,6 @@ SYSTEM_PROMPT_TZ = """
 - Не добавляй новых полей.
 """
 
-# Режим "forest_split" (кто кому должен):
-# - вопросы/общение: обычный текст (по одному вопросу)
-# - финал: обычный текст, но ПЕРВАЯ строка строго "FINAL"
 SYSTEM_PROMPT_FOREST = """
 Ты — AI-ассистент, который рассчитывает, кто кому сколько должен перевести за общие расходы (поход/лес/кафе).
 
@@ -119,6 +116,42 @@ SYSTEM_PROMPT_FOREST = """
 КРИТИЧЕСКОЕ ПРАВИЛО:
 - Слово "FINAL" пиши ТОЛЬКО в самом начале финального сообщения и только один раз.
 - До финала "FINAL" не писать.
+"""
+
+# Новый режим: "решай пошагово"
+SYSTEM_PROMPT_THINKING = """
+Ты решаешь задачи в режиме "пошаговое рассуждение".
+Правила:
+- Решай задачу пошагово.
+- В конце дай короткий итоговый ответ отдельной строкой: "ИТОГ: ...".
+- Пиши понятно и без воды.
+"""
+
+# Новый режим: "группа экспертов"
+SYSTEM_PROMPT_EXPERTS = """
+Ты решаешь задачу как "группа экспертов" внутри одного ответа.
+
+Эксперты:
+1) Логик — строгая проверка условий, поиск противоречий.
+2) Математик — вычисления/формулы/аккуратная арифметика (если нужна).
+3) Ревизор — проверяет решения Логика и Математика, ищет ошибки, даёт финальную сверку.
+
+Формат ответа строго такой:
+ЛОГИК:
+...
+
+МАТЕМАТИК:
+...
+
+РЕВИЗОР:
+...
+
+ИТОГ:
+(одна финальная формулировка результата)
+
+Правила:
+- Все три части должны быть.
+- Пиши кратко, но так, чтобы было ясно, почему итог верный.
 """
 
 
@@ -180,7 +213,8 @@ def repair_json_with_model(system_prompt: str, raw: str) -> str:
 
 
 def get_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return context.user_data.get("mode", "text")  # text | json | tz | forest
+    # text | json | tz | forest | thinking | experts
+    return context.user_data.get("mode", "text")
 
 
 async def safe_reply_text(update: Update, text: str) -> None:
@@ -216,6 +250,19 @@ def user_asked_to_show_result(user_text: str) -> bool:
     return any(k in t for k in keywords)
 
 
+def reset_tz(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("tz_history", None)
+    context.user_data.pop("tz_questions", None)
+    context.user_data.pop("tz_done", None)
+
+
+def reset_forest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("forest_history", None)
+    context.user_data.pop("forest_questions", None)
+    context.user_data.pop("forest_done", None)
+    context.user_data.pop("forest_result", None)
+
+
 # ---------- COMMANDS ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -226,8 +273,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/mode_text — обычный текст\n"
         "/mode_json — JSON на каждое сообщение\n"
-        "/tz_creation_site — режим сбора требований (вопросы текстом, итог ТЗ в JSON)\n"
-        "/forest_split — кто кому должен (вопросы текстом, итог текстом)\n\n"
+        "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)\n"
+        "/forest_split — кто кому должен (вопросы текстом, итог текстом)\n"
+        "/thinking_model — решай пошагово\n"
+        "/expert_group_model — группа экспертов\n\n"
         f"Текущий режим: {mode}"
     )
 
@@ -240,34 +289,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/mode_json — JSON на каждое сообщение\n"
         "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)\n"
         "/forest_split — посчитать кто кому должен (в конце текст)\n"
+        "/thinking_model — решать пошагово\n"
+        "/expert_group_model — решить как группа экспертов\n"
     )
 
 
 async def mode_text_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["mode"] = "text"
-    # сброс tz-сессии
-    context.user_data.pop("tz_history", None)
-    context.user_data.pop("tz_questions", None)
-    context.user_data.pop("tz_done", None)
-    # сброс forest-сессии
-    context.user_data.pop("forest_history", None)
-    context.user_data.pop("forest_questions", None)
-    context.user_data.pop("forest_done", None)
-    context.user_data.pop("forest_result", None)
+    reset_tz(context)
+    reset_forest(context)
     await safe_reply_text(update, "Ок. Режим установлен: text")
 
 
 async def mode_json_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["mode"] = "json"
-    # сброс tz-сессии
-    context.user_data.pop("tz_history", None)
-    context.user_data.pop("tz_questions", None)
-    context.user_data.pop("tz_done", None)
-    # сброс forest-сессии
-    context.user_data.pop("forest_history", None)
-    context.user_data.pop("forest_questions", None)
-    context.user_data.pop("forest_done", None)
-    context.user_data.pop("forest_result", None)
+    reset_tz(context)
+    reset_forest(context)
 
     payload = {
         "title": "Режим установлен",
@@ -283,20 +320,27 @@ async def mode_json_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+async def thinking_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["mode"] = "thinking"
+    reset_tz(context)
+    reset_forest(context)
+    await safe_reply_text(update, "Ок. Режим установлен: thinking_model (пошаговое решение).")
+
+
+async def expert_group_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["mode"] = "experts"
+    reset_tz(context)
+    reset_forest(context)
+    await safe_reply_text(update, "Ок. Режим установлен: expert_group_model (Логик/Математик/Ревизор).")
+
+
 async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Включаем режим ТЗ: вопросы задаёт ИИ текстом, итог — JSON.
-    """
     context.user_data["mode"] = "tz"
     context.user_data["tz_history"] = []
     context.user_data["tz_questions"] = 0
     context.user_data["tz_done"] = False
 
-    # сброс forest-сессии
-    context.user_data.pop("forest_history", None)
-    context.user_data.pop("forest_questions", None)
-    context.user_data.pop("forest_done", None)
-    context.user_data.pop("forest_result", None)
+    reset_forest(context)
 
     first = chat_completion([
         {"role": "system", "content": SYSTEM_PROMPT_TZ},
@@ -313,19 +357,13 @@ async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Включаем режим forest: вопросы задаёт ИИ текстом, итог — ТЕКСТ.
-    """
     context.user_data["mode"] = "forest"
     context.user_data["forest_history"] = []
     context.user_data["forest_questions"] = 0
     context.user_data["forest_done"] = False
     context.user_data.pop("forest_result", None)
 
-    # сброс tz-сессии
-    context.user_data.pop("tz_history", None)
-    context.user_data.pop("tz_questions", None)
-    context.user_data.pop("tz_done", None)
+    reset_tz(context)
 
     first = chat_completion([
         {"role": "system", "content": SYSTEM_PROMPT_FOREST},
@@ -387,14 +425,11 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if force_finalize:
         messages.append({"role": "user", "content": "Сформируй финальное ТЗ прямо сейчас. Верни только JSON по схеме."})
 
-    raw = ""
     try:
-        raw = chat_completion(messages) or ""
+        raw = (chat_completion(messages) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
-
-    raw = raw.strip()
 
     if looks_like_json(raw):
         await send_final_tz_json(update, context, raw)
@@ -409,7 +444,6 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 # ---------- FOREST FLOW ----------
 
 async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str) -> None:
-    # если расчёт готов — показываем по запросу (без отдельной команды)
     if context.user_data.get("forest_done"):
         if user_asked_to_show_result(user_text):
             res = (context.user_data.get("forest_result") or "").strip()
@@ -426,7 +460,6 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     history.append({"role": "user", "content": user_text})
 
-    # мягкий лимит на затягивание
     force_finalize = questions_asked >= 6
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT_FOREST}]
@@ -438,19 +471,16 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
             "content": "Хватит вопросов. Сформируй финальный отчёт прямо сейчас. Первая строка FINAL, далее отчёт текстом."
         })
 
-    raw = ""
     try:
-        raw = chat_completion(messages) or ""
+        raw = (chat_completion(messages) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
 
-    raw = raw.strip()
     if not raw:
         await safe_reply_text(update, "Пустой ответ от модели.")
         return
 
-    # финал?
     if is_forest_final(raw):
         report = strip_forest_final_marker(raw)
         if not report:
@@ -464,7 +494,6 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_reply_text(update, report)
         return
 
-    # иначе следующий вопрос
     history.append({"role": "assistant", "content": raw})
     context.user_data["forest_history"] = history
     context.user_data["forest_questions"] = questions_asked + 1
@@ -490,6 +519,30 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_forest_message(update, context, text)
         return
 
+    if mode == "thinking":
+        try:
+            answer = chat_completion([
+                {"role": "system", "content": SYSTEM_PROMPT_THINKING},
+                {"role": "user", "content": text},
+            ])
+        except Exception as e:
+            await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+            return
+        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
+        return
+
+    if mode == "experts":
+        try:
+            answer = chat_completion([
+                {"role": "system", "content": SYSTEM_PROMPT_EXPERTS},
+                {"role": "user", "content": text},
+            ])
+        except Exception as e:
+            await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+            return
+        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
+        return
+
     if mode == "text":
         try:
             answer = chat_completion([
@@ -500,8 +553,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
             return
 
-        answer_text = (answer or "").strip() or "Пустой ответ от модели."
-        await safe_reply_text(update, answer_text)
+        await safe_reply_text(update, (answer or "").strip() or "Пустой ответ от модели.")
         return
 
     # mode == "json": JSON на каждое сообщение
@@ -550,6 +602,8 @@ async def post_init(app: Application) -> None:
         BotCommand("mode_json", "JSON на каждое сообщение"),
         BotCommand("tz_creation_site", "Собрать ТЗ на сайт (итог JSON)"),
         BotCommand("forest_split", "Кто кому должен (итог текст)"),
+        BotCommand("thinking_model", "Решать пошагово"),
+        BotCommand("expert_group_model", "Группа экспертов"),
     ])
 
 
@@ -575,6 +629,8 @@ def run() -> None:
     app.add_handler(CommandHandler("mode_json", mode_json_cmd))
     app.add_handler(CommandHandler("tz_creation_site", tz_creation_site_cmd))
     app.add_handler(CommandHandler("forest_split", forest_split_cmd))
+    app.add_handler(CommandHandler("thinking_model", thinking_model_cmd))
+    app.add_handler(CommandHandler("expert_group_model", expert_group_model_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
