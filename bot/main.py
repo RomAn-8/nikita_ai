@@ -20,7 +20,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-# -------------------- SQLITE MEMORY --------------------
+# -------------------- TEMPERATURE --------------------
+
+DEFAULT_TEMPERATURE = 0.7
+TEMPERATURE_MIN = 0.0
+TEMPERATURE_MAX = 2.0
+
+# -------------------- MEMORY SWITCH --------------------
+
+DEFAULT_MEMORY_ENABLED = True  # по умолчанию память включена
+
+
+# -------------------- SQLITE MEMORY + SETTINGS --------------------
 
 DB_PATH = Path(__file__).resolve().parent / "bot_memory.sqlite3"
 MEMORY_LIMIT_MESSAGES = 30  # сколько последних сообщений хранить в контексте для LLM
@@ -30,11 +41,20 @@ MEMORY_CHAT_MODES = ("text", "thinking", "experts")  # общая память �
 def open_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
-    # меньше "database is locked" при параллельных апдейтах
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
     return conn
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """
+    ddl пример: 'ALTER TABLE chat_settings ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1'
+    """
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]  # (cid, name, type, notnull, dflt_value, pk)
+    if column not in cols:
+        conn.execute(ddl)
 
 
 def init_db() -> None:
@@ -53,7 +73,142 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages(chat_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_mode_id ON messages(chat_id, mode, id)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_settings (
+              chat_id INTEGER PRIMARY KEY,
+              temperature REAL NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # миграция: добавляем memory_enabled если таблица уже существовала раньше
+        _ensure_column(
+            conn,
+            table="chat_settings",
+            column="memory_enabled",
+            ddl="ALTER TABLE chat_settings ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1",
+        )
+
         conn.commit()
+
+
+def db_get_chat_settings(chat_id: int) -> tuple[float | None, bool | None]:
+    try:
+        with open_db() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                "SELECT temperature, memory_enabled FROM chat_settings WHERE chat_id = ?",
+                (int(chat_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, None
+
+            temp = None
+            mem = None
+            try:
+                temp = float(row["temperature"])
+            except Exception:
+                temp = None
+            try:
+                mem = bool(int(row["memory_enabled"]))
+            except Exception:
+                mem = None
+
+            return temp, mem
+    except Exception as e:
+        logger.exception("DB get settings failed: %s", e)
+        return None, None
+
+
+def db_set_temperature(chat_id: int, temperature: float) -> None:
+    try:
+        old_temp, old_mem = db_get_chat_settings(chat_id)
+        mem_val = int(old_mem) if isinstance(old_mem, bool) else int(DEFAULT_MEMORY_ENABLED)
+
+        with open_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                  temperature=excluded.temperature,
+                  updated_at=excluded.updated_at
+                """,
+                (int(chat_id), float(temperature), int(mem_val), utc_now_iso()),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.exception("DB set temperature failed: %s", e)
+
+
+def db_set_memory_enabled(chat_id: int, enabled: bool) -> None:
+    try:
+        old_temp, old_mem = db_get_chat_settings(chat_id)
+        temp_val = float(old_temp) if isinstance(old_temp, (int, float)) else float(DEFAULT_TEMPERATURE)
+
+        with open_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                  memory_enabled=excluded.memory_enabled,
+                  updated_at=excluded.updated_at
+                """,
+                (int(chat_id), float(temp_val), int(bool(enabled)), utc_now_iso()),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.exception("DB set memory_enabled failed: %s", e)
+
+
+def db_get_temperature(chat_id: int) -> float | None:
+    t, _ = db_get_chat_settings(chat_id)
+    return t
+
+
+def db_get_memory_enabled(chat_id: int) -> bool | None:
+    _, m = db_get_chat_settings(chat_id)
+    return m
+
+
+def get_temperature(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> float:
+    t = context.user_data.get("temperature", None)
+    if isinstance(t, (int, float)):
+        return float(t)
+
+    db_t = db_get_temperature(chat_id)
+    if isinstance(db_t, (int, float)):
+        context.user_data["temperature"] = float(db_t)
+        return float(db_t)
+
+    context.user_data["temperature"] = float(DEFAULT_TEMPERATURE)
+    return float(DEFAULT_TEMPERATURE)
+
+
+def get_memory_enabled(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    v = context.user_data.get("memory_enabled", None)
+    if isinstance(v, bool):
+        return v
+
+    db_v = db_get_memory_enabled(chat_id)
+    if isinstance(db_v, bool):
+        context.user_data["memory_enabled"] = bool(db_v)
+        return bool(db_v)
+
+    context.user_data["memory_enabled"] = bool(DEFAULT_MEMORY_ENABLED)
+    return bool(DEFAULT_MEMORY_ENABLED)
+
+
+def clamp_temperature(value: float) -> float:
+    if value < TEMPERATURE_MIN:
+        return TEMPERATURE_MIN
+    if value > TEMPERATURE_MAX:
+        return TEMPERATURE_MAX
+    return value
 
 
 def db_add_message(chat_id: int, mode: str, role: str, content: str) -> None:
@@ -68,8 +223,16 @@ def db_add_message(chat_id: int, mode: str, role: str, content: str) -> None:
             )
             conn.commit()
     except Exception as e:
-        # память не должна "ронять" бота
         logger.exception("DB add failed: %s", e)
+
+
+def db_clear_history(chat_id: int) -> None:
+    try:
+        with open_db() as conn:
+            conn.execute("DELETE FROM messages WHERE chat_id = ?", (int(chat_id),))
+            conn.commit()
+    except Exception as e:
+        logger.exception("DB clear history failed: %s", e)
 
 
 def db_get_history(chat_id: int, modes: tuple[str, ...], limit: int) -> list[dict]:
@@ -249,9 +412,6 @@ TELEGRAM_MESSAGE_LIMIT = 3900  # безопаснее 4096
 
 
 def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
-    """
-    Режем длинные сообщения на части, стараясь резать по переносам строк.
-    """
     t = (text or "").strip()
     if not t:
         return [""]
@@ -263,7 +423,7 @@ def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
     cur = t
     while len(cur) > limit:
         cut = cur.rfind("\n", 0, limit)
-        if cut < 200:  # если нет нормального переноса, режем тупо
+        if cut < 200:
             cut = limit
         parts.append(cur[:cut].rstrip())
         cur = cur[cut:].lstrip()
@@ -273,9 +433,6 @@ def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
 
 
 async def safe_reply_text(update: Update, text: str) -> None:
-    """
-    Безопасная отправка: не падаем на TimedOut/BadRequest(Message is too long).
-    """
     if not update.message:
         return
 
@@ -286,7 +443,6 @@ async def safe_reply_text(update: Update, text: str) -> None:
         except TimedOut:
             return
         except BadRequest as e:
-            # если вдруг всё равно "too long" — режем ещё сильнее
             msg = str(e).lower()
             if "message is too long" in msg and len(ch) > 500:
                 for sub in split_telegram_text(ch, limit=2000):
@@ -343,21 +499,23 @@ def normalize_payload(data: dict) -> dict:
     return normalized
 
 
-def repair_json_with_model(system_prompt: str, raw: str) -> str:
+def repair_json_with_model(system_prompt: str, raw: str, temperature: float) -> str:
     repair_prompt = (
         system_prompt
         + "\n\nИсправь следующий ответ так, чтобы он стал валидным JSON строго по схеме. Верни только JSON."
     )
-    fixed = chat_completion([
-        {"role": "system", "content": repair_prompt},
-        {"role": "user", "content": raw or ""},
-    ])
+    fixed = chat_completion(
+        [
+            {"role": "system", "content": repair_prompt},
+            {"role": "user", "content": raw or ""},
+        ],
+        temperature=temperature,
+    )
     return fixed
 
 
 def get_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
-    # text | json | tz | forest | thinking | experts
-    return context.user_data.get("mode", "text")
+    return context.user_data.get("mode", "text")  # text | json | tz | forest | thinking | experts
 
 
 def looks_like_json(text: str) -> bool:
@@ -402,6 +560,10 @@ def reset_forest(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     mode = get_mode(context)
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    t = get_temperature(context, chat_id)
+    mem = get_memory_enabled(context, chat_id)
+
     await safe_reply_text(
         update,
         "Привет!\n\n"
@@ -411,8 +573,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)\n"
         "/forest_split — кто кому должен (вопросы текстом, итог текстом)\n"
         "/thinking_model — решай пошагово\n"
-        "/expert_group_model — группа экспертов\n\n"
-        f"Текущий режим: {mode}"
+        "/expert_group_model — группа экспертов\n"
+        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)\n"
+        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)\n"
+        "/clear_memory — очистить память чата\n\n"
+        f"Текущий режим: {mode}\n"
+        f"Температура: {t}\n"
+        f"Память: {'ВКЛ' if mem else 'ВЫКЛ'}"
     )
 
 
@@ -426,7 +593,79 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/forest_split — посчитать кто кому должен (в конце текст)\n"
         "/thinking_model — решать пошагово\n"
         "/expert_group_model — решить как группа экспертов\n"
+        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)\n"
+        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)\n"
+        "/clear_memory — очистить историю памяти\n"
     )
+
+
+async def ch_temperature_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
+    if not context.args:
+        t = get_temperature(context, chat_id)
+        await safe_reply_text(
+            update,
+            f"Текущая температура: {t}\n"
+            f"Изменить: /ch_temperature <число от {TEMPERATURE_MIN} до {TEMPERATURE_MAX}>\n"
+            "Примеры: /ch_temperature 0, /ch_temperature 0.7, /ch_temperature 1.2"
+        )
+        return
+
+    raw = (context.args[0] or "").replace(",", ".").strip()
+    try:
+        val = float(raw)
+    except Exception:
+        await safe_reply_text(update, "Не понял число. Пример: /ch_temperature 0.7")
+        return
+
+    val = clamp_temperature(val)
+
+    context.user_data["temperature"] = val
+    db_set_temperature(chat_id, val)
+
+    await safe_reply_text(update, f"Ок. Температура установлена: {val}")
+
+
+async def ch_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ch_memory
+    /ch_memory on|off
+    """
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
+    if not context.args:
+        mem = get_memory_enabled(context, chat_id)
+        await safe_reply_text(
+            update,
+            f"Память сейчас: {'ВКЛ' if mem else 'ВЫКЛ'}\n"
+            "Изменить: /ch_memory on или /ch_memory off\n"
+            "Пример: /ch_memory off (для честных тестов температуры)"
+        )
+        return
+
+    v = (context.args[0] or "").strip().lower()
+    truthy = {"on", "1", "true", "yes", "y", "да", "вкл"}
+    falsy = {"off", "0", "false", "no", "n", "нет", "выкл"}
+
+    if v in truthy:
+        enabled = True
+    elif v in falsy:
+        enabled = False
+    else:
+        await safe_reply_text(update, "Не понял. Используй: /ch_memory on или /ch_memory off")
+        return
+
+    context.user_data["memory_enabled"] = enabled
+    db_set_memory_enabled(chat_id, enabled)
+
+    await safe_reply_text(update, f"Ок. Память: {'ВКЛ' if enabled else 'ВЫКЛ'}")
+
+
+async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    db_clear_history(chat_id)
+    await safe_reply_text(update, "Ок. Память чата очищена.")
 
 
 async def mode_text_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -476,13 +715,19 @@ async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["tz_done"] = False
     reset_forest(context)
 
-    first = (chat_completion([
-        {"role": "system", "content": SYSTEM_PROMPT_TZ},
-        {"role": "user", "content": "Начни. Задай первый вопрос, чтобы собрать требования для ТЗ на создание сайта."},
-    ]) or "").strip()
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    temperature = get_temperature(context, chat_id)
+
+    first = (chat_completion(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT_TZ},
+            {"role": "user", "content": "Начни. Задай первый вопрос, чтобы собрать требования для ТЗ на создание сайта."},
+        ],
+        temperature=temperature,
+    ) or "").strip()
 
     if looks_like_json(first):
-        await send_final_tz_json(update, context, first)
+        await send_final_tz_json(update, context, first, temperature=temperature)
         return
 
     context.user_data["tz_questions"] = 1
@@ -498,10 +743,16 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.pop("forest_result", None)
     reset_tz(context)
 
-    first = (chat_completion([
-        {"role": "system", "content": SYSTEM_PROMPT_FOREST},
-        {"role": "user", "content": "Начни. Задай первый вопрос для расчёта кто кому сколько должен."},
-    ]) or "").strip()
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    temperature = get_temperature(context, chat_id)
+
+    first = (chat_completion(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT_FOREST},
+            {"role": "user", "content": "Начни. Задай первый вопрос для расчёта кто кому сколько должен."},
+        ],
+        temperature=temperature,
+    ) or "").strip()
 
     context.user_data["forest_questions"] = 1
     context.user_data["forest_history"].append({"role": "assistant", "content": first})
@@ -510,14 +761,14 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # -------------------- TZ FLOW --------------------
 
-async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str) -> None:
+async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str, temperature: float) -> None:
     try:
         json_str = extract_json_object(raw)
         data = json.loads(json_str)
         payload = normalize_payload(data)
     except Exception:
         try:
-            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_TZ, raw)
+            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_TZ, raw, temperature=temperature)
             json_str = extract_json_object(fixed_raw)
             data = json.loads(json_str)
             payload = normalize_payload(data)
@@ -540,7 +791,7 @@ async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str) -> None:
+async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float) -> None:
     if context.user_data.get("tz_done"):
         await safe_reply_text(update, "ТЗ уже сформировано. Если хочешь заново — вызови /tz_creation_site.")
         return
@@ -558,13 +809,13 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         messages.append({"role": "user", "content": "Сформируй финальное ТЗ прямо сейчас. Верни только JSON по схеме."})
 
     try:
-        raw = (chat_completion(messages) or "").strip()
+        raw = (chat_completion(messages, temperature=temperature) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
 
     if looks_like_json(raw):
-        await send_final_tz_json(update, context, raw)
+        await send_final_tz_json(update, context, raw, temperature=temperature)
         return
 
     history.append({"role": "assistant", "content": raw})
@@ -575,7 +826,7 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # -------------------- FOREST FLOW --------------------
 
-async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str) -> None:
+async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float) -> None:
     if context.user_data.get("forest_done"):
         if user_asked_to_show_result(user_text):
             res = (context.user_data.get("forest_result") or "").strip()
@@ -603,7 +854,7 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
         })
 
     try:
-        raw = (chat_completion(messages) or "").strip()
+        raw = (chat_completion(messages, temperature=temperature) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
@@ -645,16 +896,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     mode = get_mode(context)
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    temperature = get_temperature(context, chat_id)
+    memory_enabled = get_memory_enabled(context, chat_id)
 
     if mode == "tz":
-        await handle_tz_message(update, context, text)
+        await handle_tz_message(update, context, text, temperature=temperature)
         return
 
     if mode == "forest":
-        await handle_forest_message(update, context, text)
+        await handle_forest_message(update, context, text, temperature=temperature)
         return
 
-    # ---- CHAT MODES WITH SQLITE MEMORY ----
+    # ---- CHAT MODES (text/thinking/experts) ----
     if mode in ("text", "thinking", "experts"):
         if mode == "thinking":
             system_prompt = SYSTEM_PROMPT_THINKING
@@ -663,20 +916,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             system_prompt = SYSTEM_PROMPT_TEXT
 
-        messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+        if memory_enabled:
+            messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+        else:
+            messages = [{"role": "system", "content": system_prompt}]  # без истории
+
         messages.append({"role": "user", "content": text})
 
         try:
-            answer = (chat_completion(messages) or "").strip()
+            answer = (chat_completion(messages, temperature=temperature) or "").strip()
         except Exception as e:
             await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
             return
 
         answer = answer or "Пустой ответ от модели."
 
-        # сохраняем в память (общая память для text/thinking/experts через выборку MEMORY_CHAT_MODES)
-        db_add_message(chat_id, mode, "user", text)
-        db_add_message(chat_id, mode, "assistant", answer)
+        # пишем в БД только если память включена
+        if memory_enabled:
+            db_add_message(chat_id, mode, "user", text)
+            db_add_message(chat_id, mode, "assistant", answer)
 
         await safe_reply_text(update, answer)
         return
@@ -684,10 +942,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ---- JSON MODE (без памяти) ----
     raw = ""
     try:
-        raw = chat_completion([
-            {"role": "system", "content": SYSTEM_PROMPT_JSON},
-            {"role": "user", "content": text},
-        ]) or ""
+        raw = chat_completion(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT_JSON},
+                {"role": "user", "content": text},
+            ],
+            temperature=temperature,
+        ) or ""
 
         json_str = extract_json_object(raw)
         data = json.loads(json_str)
@@ -695,7 +956,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except Exception:
         try:
-            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_JSON, raw or text)
+            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_JSON, raw or text, temperature=temperature)
             json_str = extract_json_object(fixed_raw)
             data = json.loads(json_str)
             payload = normalize_payload(data)
@@ -720,7 +981,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # чтобы не было "No error handlers are registered"
     logger.exception("Unhandled error: %s", context.error)
     if isinstance(update, Update) and update.message:
         await safe_reply_text(update, f"Внутренняя ошибка: {type(context.error).__name__}: {context.error}")
@@ -738,6 +998,9 @@ async def post_init(app: Application) -> None:
         BotCommand("forest_split", "Кто кому должен (итог текст)"),
         BotCommand("thinking_model", "Решать пошагово"),
         BotCommand("expert_group_model", "Группа экспертов"),
+        BotCommand("ch_temperature", "Показать/изменить температуру (пример: /ch_temperature 0.7)"),
+        BotCommand("ch_memory", "Память ВКЛ/ВЫКЛ (пример: /ch_memory off)"),
+        BotCommand("clear_memory", "Очистить память чата"),
     ])
 
 
@@ -763,12 +1026,18 @@ def run() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("ch_temperature", ch_temperature_cmd))
+    app.add_handler(CommandHandler("ch_memory", ch_memory_cmd))
+    app.add_handler(CommandHandler("clear_memory", clear_memory_cmd))
+
     app.add_handler(CommandHandler("mode_text", mode_text_cmd))
     app.add_handler(CommandHandler("mode_json", mode_json_cmd))
     app.add_handler(CommandHandler("tz_creation_site", tz_creation_site_cmd))
     app.add_handler(CommandHandler("forest_split", forest_split_cmd))
     app.add_handler(CommandHandler("thinking_model", thinking_model_cmd))
     app.add_handler(CommandHandler("expert_group_model", expert_group_model_cmd))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
