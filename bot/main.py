@@ -1,3 +1,4 @@
+import os
 import json
 import re
 import sqlite3
@@ -10,7 +11,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL
 from .openrouter import chat_completion
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _short_model_name(m: str) -> str:
+    m = (m or "").strip()
+    if not m:
+        return "default"
+    return m.split("/")[-1]
 
 
 # -------------------- TEMPERATURE --------------------
@@ -29,6 +37,14 @@ TEMPERATURE_MAX = 2.0
 # -------------------- MEMORY SWITCH --------------------
 
 DEFAULT_MEMORY_ENABLED = True  # по умолчанию память включена
+
+# -------------------- MODELS FROM ENV --------------------
+# Добавь в .env:
+# OPENROUTER_MODEL_GLM=z-ai/glm-4.7-flash
+# OPENROUTER_MODEL_GEMMA=google/gemma-3-12b-it
+
+MODEL_GLM = (os.getenv("OPENROUTER_MODEL_GLM") or "").strip()
+MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
 
 
 # -------------------- SQLITE MEMORY + SETTINGS --------------------
@@ -83,61 +99,78 @@ def init_db() -> None:
             )
             """
         )
-        # миграция: добавляем memory_enabled если таблица уже существовала раньше
+
+        # миграции: добавляем колонки если таблица уже существовала раньше
         _ensure_column(
             conn,
             table="chat_settings",
             column="memory_enabled",
             ddl="ALTER TABLE chat_settings ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1",
         )
+        _ensure_column(
+            conn,
+            table="chat_settings",
+            column="model",
+            ddl="ALTER TABLE chat_settings ADD COLUMN model TEXT",
+        )
 
         conn.commit()
 
 
-def db_get_chat_settings(chat_id: int) -> tuple[float | None, bool | None]:
+def db_get_chat_settings(chat_id: int) -> tuple[float | None, bool | None, str | None]:
     try:
         with open_db() as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT temperature, memory_enabled FROM chat_settings WHERE chat_id = ?",
+                "SELECT temperature, memory_enabled, model FROM chat_settings WHERE chat_id = ?",
                 (int(chat_id),),
             )
             row = cur.fetchone()
             if not row:
-                return None, None
+                return None, None, None
 
             temp = None
             mem = None
+            model = None
+
             try:
                 temp = float(row["temperature"])
             except Exception:
                 temp = None
+
             try:
                 mem = bool(int(row["memory_enabled"]))
             except Exception:
                 mem = None
 
-            return temp, mem
+            try:
+                m = row["model"]
+                model = str(m).strip() if m else None
+            except Exception:
+                model = None
+
+            return temp, mem, model
     except Exception as e:
         logger.exception("DB get settings failed: %s", e)
-        return None, None
+        return None, None, None
 
 
 def db_set_temperature(chat_id: int, temperature: float) -> None:
     try:
-        old_temp, old_mem = db_get_chat_settings(chat_id)
+        old_temp, old_mem, old_model = db_get_chat_settings(chat_id)
         mem_val = int(old_mem) if isinstance(old_mem, bool) else int(DEFAULT_MEMORY_ENABLED)
+        model_val = (old_model or "").strip() or None
 
         with open_db() as conn:
             conn.execute(
                 """
-                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, updated_at)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, model, updated_at)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                   temperature=excluded.temperature,
                   updated_at=excluded.updated_at
                 """,
-                (int(chat_id), float(temperature), int(mem_val), utc_now_iso()),
+                (int(chat_id), float(temperature), int(mem_val), model_val, utc_now_iso()),
             )
             conn.commit()
     except Exception as e:
@@ -146,32 +179,61 @@ def db_set_temperature(chat_id: int, temperature: float) -> None:
 
 def db_set_memory_enabled(chat_id: int, enabled: bool) -> None:
     try:
-        old_temp, old_mem = db_get_chat_settings(chat_id)
+        old_temp, old_mem, old_model = db_get_chat_settings(chat_id)
         temp_val = float(old_temp) if isinstance(old_temp, (int, float)) else float(DEFAULT_TEMPERATURE)
+        model_val = (old_model or "").strip() or None
 
         with open_db() as conn:
             conn.execute(
                 """
-                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, updated_at)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, model, updated_at)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                   memory_enabled=excluded.memory_enabled,
                   updated_at=excluded.updated_at
                 """,
-                (int(chat_id), float(temp_val), int(bool(enabled)), utc_now_iso()),
+                (int(chat_id), float(temp_val), int(bool(enabled)), model_val, utc_now_iso()),
             )
             conn.commit()
     except Exception as e:
         logger.exception("DB set memory_enabled failed: %s", e)
 
 
+def db_set_model(chat_id: int, model: str) -> None:
+    try:
+        old_temp, old_mem, old_model = db_get_chat_settings(chat_id)
+        temp_val = float(old_temp) if isinstance(old_temp, (int, float)) else float(DEFAULT_TEMPERATURE)
+        mem_val = int(old_mem) if isinstance(old_mem, bool) else int(DEFAULT_MEMORY_ENABLED)
+        model_val = (model or "").strip() or None
+
+        with open_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_settings(chat_id, temperature, memory_enabled, model, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                  model=excluded.model,
+                  updated_at=excluded.updated_at
+                """,
+                (int(chat_id), float(temp_val), int(mem_val), model_val, utc_now_iso()),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.exception("DB set model failed: %s", e)
+
+
 def db_get_temperature(chat_id: int) -> float | None:
-    t, _ = db_get_chat_settings(chat_id)
+    t, _, _ = db_get_chat_settings(chat_id)
     return t
 
 
 def db_get_memory_enabled(chat_id: int) -> bool | None:
-    _, m = db_get_chat_settings(chat_id)
+    _, m, _ = db_get_chat_settings(chat_id)
+    return m
+
+
+def db_get_model(chat_id: int) -> str | None:
+    _, _, m = db_get_chat_settings(chat_id)
     return m
 
 
@@ -201,6 +263,25 @@ def get_memory_enabled(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool
 
     context.user_data["memory_enabled"] = bool(DEFAULT_MEMORY_ENABLED)
     return bool(DEFAULT_MEMORY_ENABLED)
+
+
+def get_model(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    v = context.user_data.get("model", None)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+
+    db_v = db_get_model(chat_id)
+    if isinstance(db_v, str) and db_v.strip():
+        context.user_data["model"] = db_v.strip()
+        return db_v.strip()
+
+    # пустая строка => openrouter.py возьмёт OPENROUTER_MODEL из config
+    return ""
+
+
+def get_effective_model(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    selected = get_model(context, chat_id)
+    return selected if selected else OPENROUTER_MODEL
 
 
 def clamp_temperature(value: float) -> float:
@@ -499,7 +580,7 @@ def normalize_payload(data: dict) -> dict:
     return normalized
 
 
-def repair_json_with_model(system_prompt: str, raw: str, temperature: float) -> str:
+def repair_json_with_model(system_prompt: str, raw: str, temperature: float, model: str | None) -> str:
     repair_prompt = (
         system_prompt
         + "\n\nИсправь следующий ответ так, чтобы он стал валидным JSON строго по схеме. Верни только JSON."
@@ -510,6 +591,7 @@ def repair_json_with_model(system_prompt: str, raw: str, temperature: float) -> 
             {"role": "user", "content": raw or ""},
         ],
         temperature=temperature,
+        model=model,
     )
     return fixed
 
@@ -563,40 +645,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
     t = get_temperature(context, chat_id)
     mem = get_memory_enabled(context, chat_id)
+    current_model = get_effective_model(context, chat_id)
 
-    await safe_reply_text(
-        update,
-        "Привет!\n\n"
-        "Команды:\n"
-        "/mode_text — обычный текст\n"
-        "/mode_json — JSON на каждое сообщение\n"
-        "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)\n"
-        "/forest_split — кто кому должен (вопросы текстом, итог текстом)\n"
-        "/thinking_model — решай пошагово\n"
-        "/expert_group_model — группа экспертов\n"
-        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)\n"
-        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)\n"
-        "/clear_memory — очистить память чата\n\n"
-        f"Текущий режим: {mode}\n"
-        f"Температура: {t}\n"
-        f"Память: {'ВКЛ' if mem else 'ВЫКЛ'}"
-    )
+    lines = [
+        "Привет!",
+        "",
+        "Команды:",
+        f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
+        "/mode_json — JSON на каждое сообщение",
+        "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)",
+        "/forest_split — кто кому должен (вопросы текстом, итог текстом)",
+        "/thinking_model — решай пошагово",
+        "/expert_group_model — группа экспертов",
+        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
+        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
+        "/clear_memory — очистить память чата",
+    ]
+
+    if MODEL_GLM:
+        lines.append(f"/model_glm — модель {_short_model_name(MODEL_GLM)}")
+    if MODEL_GEMMA:
+        lines.append(f"/model_gemma — модель {_short_model_name(MODEL_GEMMA)}")
+
+    lines.extend([
+        "",
+        f"Текущий режим: {mode}",
+        f"Температура: {t}",
+        f"Память: {'ВКЛ' if mem else 'ВЫКЛ'}",
+        f"Модель: {current_model}",
+    ])
+
+    await safe_reply_text(update, "\n".join(lines))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await safe_reply_text(
-        update,
-        "Команды:\n"
-        "/mode_text — обычный текст\n"
-        "/mode_json — JSON на каждое сообщение\n"
-        "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)\n"
-        "/forest_split — посчитать кто кому должен (в конце текст)\n"
-        "/thinking_model — решать пошагово\n"
-        "/expert_group_model — решить как группа экспертов\n"
-        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)\n"
-        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)\n"
-        "/clear_memory — очистить историю памяти\n"
-    )
+    lines = [
+        "Команды:",
+        f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
+        "/mode_json — JSON на каждое сообщение",
+        "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)",
+        "/forest_split — посчитать кто кому должен (в конце текст)",
+        "/thinking_model — решать пошагово",
+        "/expert_group_model — решить как группа экспертов",
+        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
+        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
+        "/clear_memory — очистить историю памяти",
+    ]
+
+    if MODEL_GLM:
+        lines.append(f"/model_glm — переключить на {MODEL_GLM}")
+    if MODEL_GEMMA:
+        lines.append(f"/model_gemma — переключить на {MODEL_GEMMA}")
+
+    await safe_reply_text(update, "\n".join(lines))
 
 
 async def ch_temperature_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -668,11 +769,38 @@ async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await safe_reply_text(update, "Ок. Память чата очищена.")
 
 
+async def model_glm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not MODEL_GLM:
+        await safe_reply_text(update, "Модель OPENROUTER_MODEL_GLM не задана в .env")
+        return
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    context.user_data["model"] = MODEL_GLM
+    db_set_model(chat_id, MODEL_GLM)
+    await safe_reply_text(update, f"Ок. Модель установлена: {MODEL_GLM}")
+
+
+async def model_gemma_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not MODEL_GEMMA:
+        await safe_reply_text(update, "Модель OPENROUTER_MODEL_GEMMA не задана в .env")
+        return
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    context.user_data["model"] = MODEL_GEMMA
+    db_set_model(chat_id, MODEL_GEMMA)
+    await safe_reply_text(update, f"Ок. Модель установлена: {MODEL_GEMMA}")
+
+
 async def mode_text_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
     context.user_data["mode"] = "text"
     reset_tz(context)
     reset_forest(context)
-    await safe_reply_text(update, "Ок. Режим установлен: text")
+
+    # Сброс на дефолтную модель из .env (OPENROUTER_MODEL)
+    context.user_data.pop("model", None)
+    db_set_model(chat_id, "")
+
+    await safe_reply_text(update, f"Ок. Режим: text. Модель: {OPENROUTER_MODEL}")
 
 
 async def mode_json_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -717,6 +845,7 @@ async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
 
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
     temperature = get_temperature(context, chat_id)
+    model = get_model(context, chat_id) or None
 
     first = (chat_completion(
         [
@@ -724,10 +853,11 @@ async def tz_creation_site_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
             {"role": "user", "content": "Начни. Задай первый вопрос, чтобы собрать требования для ТЗ на создание сайта."},
         ],
         temperature=temperature,
+        model=model,
     ) or "").strip()
 
     if looks_like_json(first):
-        await send_final_tz_json(update, context, first, temperature=temperature)
+        await send_final_tz_json(update, context, first, temperature=temperature, model=model)
         return
 
     context.user_data["tz_questions"] = 1
@@ -745,6 +875,7 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
     temperature = get_temperature(context, chat_id)
+    model = get_model(context, chat_id) or None
 
     first = (chat_completion(
         [
@@ -752,6 +883,7 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             {"role": "user", "content": "Начни. Задай первый вопрос для расчёта кто кому сколько должен."},
         ],
         temperature=temperature,
+        model=model,
     ) or "").strip()
 
     context.user_data["forest_questions"] = 1
@@ -761,14 +893,14 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # -------------------- TZ FLOW --------------------
 
-async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str, temperature: float) -> None:
+async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str, temperature: float, model: str | None) -> None:
     try:
         json_str = extract_json_object(raw)
         data = json.loads(json_str)
         payload = normalize_payload(data)
     except Exception:
         try:
-            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_TZ, raw, temperature=temperature)
+            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_TZ, raw, temperature=temperature, model=model)
             json_str = extract_json_object(fixed_raw)
             data = json.loads(json_str)
             payload = normalize_payload(data)
@@ -791,7 +923,7 @@ async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float) -> None:
+async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float, model: str | None) -> None:
     if context.user_data.get("tz_done"):
         await safe_reply_text(update, "ТЗ уже сформировано. Если хочешь заново — вызови /tz_creation_site.")
         return
@@ -809,13 +941,13 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         messages.append({"role": "user", "content": "Сформируй финальное ТЗ прямо сейчас. Верни только JSON по схеме."})
 
     try:
-        raw = (chat_completion(messages, temperature=temperature) or "").strip()
+        raw = (chat_completion(messages, temperature=temperature, model=model) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
 
     if looks_like_json(raw):
-        await send_final_tz_json(update, context, raw, temperature=temperature)
+        await send_final_tz_json(update, context, raw, temperature=temperature, model=model)
         return
 
     history.append({"role": "assistant", "content": raw})
@@ -826,7 +958,7 @@ async def handle_tz_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # -------------------- FOREST FLOW --------------------
 
-async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float) -> None:
+async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, temperature: float, model: str | None) -> None:
     if context.user_data.get("forest_done"):
         if user_asked_to_show_result(user_text):
             res = (context.user_data.get("forest_result") or "").strip()
@@ -854,7 +986,7 @@ async def handle_forest_message(update: Update, context: ContextTypes.DEFAULT_TY
         })
 
     try:
-        raw = (chat_completion(messages, temperature=temperature) or "").strip()
+        raw = (chat_completion(messages, temperature=temperature, model=model) or "").strip()
     except Exception as e:
         await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
         return
@@ -898,13 +1030,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
     temperature = get_temperature(context, chat_id)
     memory_enabled = get_memory_enabled(context, chat_id)
+    model = get_model(context, chat_id) or None
 
     if mode == "tz":
-        await handle_tz_message(update, context, text, temperature=temperature)
+        await handle_tz_message(update, context, text, temperature=temperature, model=model)
         return
 
     if mode == "forest":
-        await handle_forest_message(update, context, text, temperature=temperature)
+        await handle_forest_message(update, context, text, temperature=temperature, model=model)
         return
 
     # ---- CHAT MODES (text/thinking/experts) ----
@@ -924,7 +1057,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         messages.append({"role": "user", "content": text})
 
         try:
-            answer = (chat_completion(messages, temperature=temperature) or "").strip()
+            answer = (chat_completion(messages, temperature=temperature, model=model) or "").strip()
         except Exception as e:
             await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
             return
@@ -948,6 +1081,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 {"role": "user", "content": text},
             ],
             temperature=temperature,
+            model=model,
         ) or ""
 
         json_str = extract_json_object(raw)
@@ -956,7 +1090,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except Exception:
         try:
-            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_JSON, raw or text, temperature=temperature)
+            fixed_raw = repair_json_with_model(SYSTEM_PROMPT_JSON, raw or text, temperature=temperature, model=model)
             json_str = extract_json_object(fixed_raw)
             data = json.loads(json_str)
             payload = normalize_payload(data)
@@ -989,10 +1123,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # -------------------- BOT COMMANDS MENU --------------------
 
 async def post_init(app: Application) -> None:
-    await app.bot.set_my_commands([
+    cmds = [
         BotCommand("start", "Старт"),
         BotCommand("help", "Справка"),
-        BotCommand("mode_text", "Обычный текст"),
+        BotCommand("mode_text", f"Режим text + {_short_model_name(OPENROUTER_MODEL)}"),
         BotCommand("mode_json", "JSON на каждое сообщение"),
         BotCommand("tz_creation_site", "Собрать ТЗ на сайт (итог JSON)"),
         BotCommand("forest_split", "Кто кому должен (итог текст)"),
@@ -1001,7 +1135,14 @@ async def post_init(app: Application) -> None:
         BotCommand("ch_temperature", "Показать/изменить температуру (пример: /ch_temperature 0.7)"),
         BotCommand("ch_memory", "Память ВКЛ/ВЫКЛ (пример: /ch_memory off)"),
         BotCommand("clear_memory", "Очистить память чата"),
-    ])
+    ]
+
+    if MODEL_GLM:
+        cmds.append(BotCommand("model_glm", f"Модель: {_short_model_name(MODEL_GLM)}"))
+    if MODEL_GEMMA:
+        cmds.append(BotCommand("model_gemma", f"Модель: {_short_model_name(MODEL_GEMMA)}"))
+
+    await app.bot.set_my_commands(cmds)
 
 
 def run() -> None:
@@ -1030,6 +1171,11 @@ def run() -> None:
     app.add_handler(CommandHandler("ch_temperature", ch_temperature_cmd))
     app.add_handler(CommandHandler("ch_memory", ch_memory_cmd))
     app.add_handler(CommandHandler("clear_memory", clear_memory_cmd))
+
+    if MODEL_GLM:
+        app.add_handler(CommandHandler("model_glm", model_glm_cmd))
+    if MODEL_GEMMA:
+        app.add_handler(CommandHandler("model_gemma", model_gemma_cmd))
 
     app.add_handler(CommandHandler("mode_text", mode_text_cmd))
     app.add_handler(CommandHandler("mode_json", mode_json_cmd))
