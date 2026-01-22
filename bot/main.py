@@ -13,6 +13,7 @@ from telegram.request import HTTPXRequest
 
 from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL
 from .openrouter import chat_completion
+from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 logger = logging.getLogger(__name__)
 
@@ -657,6 +658,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/forest_split — кто кому должен (вопросы текстом, итог текстом)",
         "/thinking_model — решай пошагово",
         "/expert_group_model — группа экспертов",
+        "/tokens_test — тест токенов (режим: короткий/длинный/перелимит)",
+        "/tokens_next — следующий этап теста токенов",
+        "/tokens_stop — сводка и выход из теста токенов",
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
         "/clear_memory — очистить память чата",
@@ -687,6 +691,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/forest_split — посчитать кто кому должен (в конце текст)",
         "/thinking_model — решать пошагово",
         "/expert_group_model — решить как группа экспертов",
+        "/tokens_test — тест токенов (режим)",
+        "/tokens_next — следующий этап теста токенов",
+        "/tokens_stop — сводка и выход из теста токенов",
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
         "/clear_memory — очистить историю памяти",
@@ -1024,6 +1031,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    # перехват режима теста токенов (если включен)
+    if await tokens_test_intercept(update, context, text):
+        return
+
     await update.message.chat.send_action("typing")
 
     mode = get_mode(context)
@@ -1132,6 +1143,9 @@ async def post_init(app: Application) -> None:
         BotCommand("forest_split", "Кто кому должен (итог текст)"),
         BotCommand("thinking_model", "Решать пошагово"),
         BotCommand("expert_group_model", "Группа экспертов"),
+        BotCommand("tokens_test", "Тест токенов (включить режим)"),
+        BotCommand("tokens_next", "Тест токенов: следующий этап"),
+        BotCommand("tokens_stop", "Тест токенов: сводка и выход"),
         BotCommand("ch_temperature", "Показать/изменить температуру (пример: /ch_temperature 0.7)"),
         BotCommand("ch_memory", "Память ВКЛ/ВЫКЛ (пример: /ch_memory off)"),
         BotCommand("clear_memory", "Очистить память чата"),
@@ -1163,10 +1177,23 @@ def run() -> None:
         .build()
     )
 
+    # deps для tokens_test.py (чтобы не дублировать логику)
+    app.bot_data["tokens_deps"] = {
+        "get_temperature": get_temperature,
+        "get_model": get_model,
+        "get_effective_model": get_effective_model,
+        "SYSTEM_PROMPT_TEXT": SYSTEM_PROMPT_TEXT,
+        "safe_reply_text": safe_reply_text,
+    }
+
     app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("tokens_test", tokens_test_cmd))
+    app.add_handler(CommandHandler("tokens_next", tokens_next_cmd))
+    app.add_handler(CommandHandler("tokens_stop", tokens_stop_cmd))
 
     app.add_handler(CommandHandler("ch_temperature", ch_temperature_cmd))
     app.add_handler(CommandHandler("ch_memory", ch_memory_cmd))
