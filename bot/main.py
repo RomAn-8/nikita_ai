@@ -12,8 +12,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.request import HTTPXRequest
 
 from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL
-from .openrouter import chat_completion
+from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
+
+# NEW: summary-mode
+from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compress_history, clear_summary, summary_debug_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,35 @@ def _short_model_name(m: str) -> str:
     if not m:
         return "default"
     return m.split("/")[-1]
+
+
+def _get_usage_tokens(data: dict) -> tuple[int | None, int | None, int | None]:
+    usage = data.get("usage") or {}
+    pt = usage.get("prompt_tokens")
+    ct = usage.get("completion_tokens")
+    tt = usage.get("total_tokens")
+
+    try:
+        pt = int(pt) if pt is not None else None
+    except Exception:
+        pt = None
+    try:
+        ct = int(ct) if ct is not None else None
+    except Exception:
+        ct = None
+    try:
+        tt = int(tt) if tt is not None else None
+    except Exception:
+        tt = None
+
+    return pt, ct, tt
+
+
+def _get_content_from_raw(data: dict) -> str:
+    try:
+        return (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    except Exception:
+        return ""
 
 
 # -------------------- TEMPERATURE --------------------
@@ -598,7 +630,7 @@ def repair_json_with_model(system_prompt: str, raw: str, temperature: float, mod
 
 
 def get_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return context.user_data.get("mode", "text")  # text | json | tz | forest | thinking | experts
+    return context.user_data.get("mode", "text")  # text | json | tz | forest | thinking | experts | summary
 
 
 def looks_like_json(text: str) -> bool:
@@ -654,6 +686,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:",
         f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
         "/mode_json — JSON на каждое сообщение",
+        f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
         "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)",
         "/forest_split — кто кому должен (вопросы текстом, итог текстом)",
         "/thinking_model — решай пошагово",
@@ -687,6 +720,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:",
         f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
         "/mode_json — JSON на каждое сообщение",
+        f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
         "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)",
         "/forest_split — посчитать кто кому должен (в конце текст)",
         "/thinking_model — решать пошагово",
@@ -773,6 +807,13 @@ async def ch_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = int(update.effective_chat.id) if update.effective_chat else 0
     db_clear_history(chat_id)
+
+    # NEW: чистим summary-таблицу тоже
+    try:
+        clear_summary(chat_id, mode=MODE_SUMMARY)
+    except Exception:
+        pass
+
     await safe_reply_text(update, "Ок. Память чата очищена.")
 
 
@@ -827,6 +868,21 @@ async def mode_json_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }
     context.user_data["last_payload"] = payload
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# NEW: summary mode command
+async def mode_summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
+    context.user_data["mode"] = MODE_SUMMARY
+    reset_tz(context)
+    reset_forest(context)
+
+    # В summary-режиме память нужна всегда
+    context.user_data["memory_enabled"] = True
+    db_set_memory_enabled(chat_id, True)
+
+    await safe_reply_text(update, "Ок. Режим: summary (сжатие истории: summary вместо полной истории).")
 
 
 async def thinking_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1051,8 +1107,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_forest_message(update, context, text, temperature=temperature, model=model)
         return
 
-    # ---- CHAT MODES (text/thinking/experts) ----
-    if mode in ("text", "thinking", "experts"):
+    # ---- CHAT MODES (text/thinking/experts/summary) ----
+    if mode in ("text", "thinking", "experts", MODE_SUMMARY):
         if mode == "thinking":
             system_prompt = SYSTEM_PROMPT_THINKING
         elif mode == "experts":
@@ -1061,12 +1117,49 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             system_prompt = SYSTEM_PROMPT_TEXT
 
         if memory_enabled:
-            messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+            # NEW: summary-context builder
+            if mode == MODE_SUMMARY:
+                messages = build_messages_with_summary(system_prompt, chat_id=chat_id, mode=MODE_SUMMARY)
+            else:
+                messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
         else:
             messages = [{"role": "system", "content": system_prompt}]  # без истории
 
         messages.append({"role": "user", "content": text})
 
+        # SUMMARY: нужен raw, чтобы взять usage
+        if mode == MODE_SUMMARY:
+            try:
+                data = chat_completion_raw(messages, temperature=temperature, model=model)
+                answer = _get_content_from_raw(data)
+                pt, ct, tt = _get_usage_tokens(data)
+                req_id = str(data.get("id") or "").strip()
+            except Exception as e:
+                await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+                return
+
+            answer = (answer or "").strip() or "Пустой ответ от модели."
+
+            # пишем в БД (summary всегда с памятью)
+            db_add_message(chat_id, mode, "user", text)
+            db_add_message(chat_id, mode, "assistant", answer)
+
+            try:
+                maybe_compress_history(chat_id, temperature=0.0, mode=MODE_SUMMARY)
+            except Exception:
+                pass
+
+            # 1) ответ
+            def fmt(x: int | None) -> str:
+                return str(x) if isinstance(x, int) else "n/a"
+
+            rid = f", id={req_id}" if req_id else ""
+            combined = f"{answer}\n\nТокены: запрос={fmt(pt)}, ответ={fmt(ct)}, всего={fmt(tt)}{rid}"
+            await safe_reply_text(update, combined)
+            return
+
+
+        # НЕ summary — как было
         try:
             answer = (chat_completion(messages, temperature=temperature, model=model) or "").strip()
         except Exception as e:
@@ -1139,6 +1232,8 @@ async def post_init(app: Application) -> None:
         BotCommand("help", "Справка"),
         BotCommand("mode_text", f"Режим text + {_short_model_name(OPENROUTER_MODEL)}"),
         BotCommand("mode_json", "JSON на каждое сообщение"),
+        BotCommand("mode_summary", f"Режим summary + {_short_model_name(OPENROUTER_MODEL)}"),
+        BotCommand("summary_debug", "Показать текущее summary (режим summary)"),
         BotCommand("tz_creation_site", "Собрать ТЗ на сайт (итог JSON)"),
         BotCommand("forest_split", "Кто кому должен (итог текст)"),
         BotCommand("thinking_model", "Решать пошагово"),
@@ -1206,6 +1301,8 @@ def run() -> None:
 
     app.add_handler(CommandHandler("mode_text", mode_text_cmd))
     app.add_handler(CommandHandler("mode_json", mode_json_cmd))
+    app.add_handler(CommandHandler("mode_summary", mode_summary_cmd))
+    app.add_handler(CommandHandler("summary_debug", summary_debug_cmd))
     app.add_handler(CommandHandler("tz_creation_site", tz_creation_site_cmd))
     app.add_handler(CommandHandler("forest_split", forest_split_cmd))
     app.add_handler(CommandHandler("thinking_model", thinking_model_cmd))
