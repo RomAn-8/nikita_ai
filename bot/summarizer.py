@@ -17,7 +17,7 @@ MODE_SUMMARY = "summary"
 COMPRESS_EVERY_MESSAGES = 10
 
 # сколько последних сообщений оставлять "живыми" (не сжимать)
-KEEP_TAIL_MESSAGES = 8
+KEEP_TAIL_MESSAGES = 0
 
 # сколько последних сообщений добавлять в контекст вместе с summary
 TAIL_IN_CONTEXT = 12
@@ -200,13 +200,16 @@ def maybe_compress_history(chat_id: int, temperature: float = 0.0, mode: str = M
 
     if len(new_msgs) < COMPRESS_EVERY_MESSAGES:
         return False
-    if len(new_msgs) <= KEEP_TAIL_MESSAGES:
+
+    # Сжимаем только полные блоки по 10 записей
+    compress_count = (len(new_msgs) // COMPRESS_EVERY_MESSAGES) * COMPRESS_EVERY_MESSAGES
+    if compress_count <= 0:
         return False
 
-    # сжимаем всё, кроме хвоста KEEP_TAIL_MESSAGES
-    cutoff = len(new_msgs) - KEEP_TAIL_MESSAGES
-    chunk = new_msgs[:cutoff]
+    chunk = new_msgs[:compress_count]
     last_summarized_id = chunk[-1][0]
+
+
 
     lines = []
     for _, role, content in chunk:
