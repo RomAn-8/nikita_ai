@@ -17,6 +17,8 @@ from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, toke
 
 # NEW: summary-mode
 from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compress_history, clear_summary, summary_debug_cmd
+from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
+
 
 logger = logging.getLogger(__name__)
 
@@ -1109,6 +1111,31 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ---- CHAT MODES (text/thinking/experts/summary) ----
     if mode in ("text", "thinking", "experts", MODE_SUMMARY):
+        # Проверка на запрос погоды в режиме summary (например: "Погода Москва" или "Погода Самара")
+        weather_request_handled = False
+        if mode == MODE_SUMMARY:
+            # Паттерн: "Погода" + название города (может быть на русском или английском)
+            weather_match = re.match(r"^(?:погода|weather)\s+(.+)$", text, re.IGNORECASE)
+            if weather_match:
+                city = weather_match.group(1).strip()
+                if city:
+                    # Получаем погоду через MCP и возвращаем результат
+                    weather_text = await get_weather_via_mcp(city)
+                    # Сохраняем запрос и ответ в БД для истории
+                    db_add_message(chat_id, mode, "user", text)
+                    db_add_message(chat_id, mode, "assistant", weather_text)
+                    
+                    # Вызываем сжатие истории (как для обычных сообщений)
+                    try:
+                        maybe_compress_history(chat_id, temperature=0.0, mode=MODE_SUMMARY)
+                    except Exception:
+                        pass
+                    
+                    # Отправляем ответ с погодой
+                    await safe_reply_text(update, weather_text)
+                    weather_request_handled = True
+                    return
+
         if mode == "thinking":
             system_prompt = SYSTEM_PROMPT_THINKING
         elif mode == "experts":
@@ -1307,6 +1334,7 @@ def run() -> None:
     app.add_handler(CommandHandler("forest_split", forest_split_cmd))
     app.add_handler(CommandHandler("thinking_model", thinking_model_cmd))
     app.add_handler(CommandHandler("expert_group_model", expert_group_model_cmd))
+
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
