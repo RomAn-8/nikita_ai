@@ -18,6 +18,7 @@ from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, toke
 # NEW: summary-mode
 from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compress_history, clear_summary, summary_debug_cmd
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
+from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
 
 
 logger = logging.getLogger(__name__)
@@ -956,6 +957,69 @@ async def forest_split_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await safe_reply_text(update, first)
 
 
+# -------------------- WEATHER SUBSCRIPTION --------------------
+async def weather_sub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для подписки на погоду с периодическим сбором данных.
+    Формат: /weather_sub <Город> <время_в_секундах>
+    Пример: /weather_sub Москва 30
+    """
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
+    if not context.args or len(context.args) < 2:
+        await safe_reply_text(
+            update,
+            "Использование: /weather_sub <Город> <время_в_секундах>\n"
+            "Пример: /weather_sub Москва 30\n"
+            "Подписка будет собирать погоду каждые 10 секунд и отправлять summary каждые указанные секунды.",
+        )
+        return
+
+    city = context.args[0].strip()
+    try:
+        summary_interval = int(context.args[1])
+        if summary_interval < 10:
+            await safe_reply_text(update, "Интервал summary должен быть не менее 10 секунд.")
+            return
+    except ValueError:
+        await safe_reply_text(update, "Время должно быть числом (в секундах).")
+        return
+
+    # Запускаем подписку
+    try:
+        start_weather_subscription(
+            chat_id=chat_id,
+            city=city,
+            summary_interval=summary_interval,
+            bot=context.bot,
+            context=context,
+            db_add_message=db_add_message,
+        )
+    except Exception as e:
+        logger.exception(f"Failed to start weather subscription: {e}")
+        await safe_reply_text(update, f"Ошибка при запуске подписки: {e}")
+
+
+async def weather_sub_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для остановки подписки на погоду.
+    Формат: /weather_sub_stop <Город>
+    """
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+
+    if not context.args or len(context.args) < 1:
+        await safe_reply_text(update, "Использование: /weather_sub_stop <Город>\nПример: /weather_sub_stop Москва")
+        return
+
+    city = context.args[0].strip()
+    stopped = stop_weather_subscription(chat_id=chat_id, city=city, context=context)
+
+    if stopped:
+        await safe_reply_text(update, f"✅ Подписка на погоду для {city} остановлена.")
+    else:
+        await safe_reply_text(update, f"❌ Подписка на погоду для {city} не найдена.")
+
+
 # -------------------- TZ FLOW --------------------
 
 async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str, temperature: float, model: str | None) -> None:
@@ -1271,6 +1335,8 @@ async def post_init(app: Application) -> None:
         BotCommand("ch_temperature", "Показать/изменить температуру (пример: /ch_temperature 0.7)"),
         BotCommand("ch_memory", "Память ВКЛ/ВЫКЛ (пример: /ch_memory off)"),
         BotCommand("clear_memory", "Очистить память чата"),
+        BotCommand("weather_sub", "Подписка на погоду (пример: /weather_sub Москва 30)"),
+        BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
     ]
 
     if MODEL_GLM:
@@ -1334,6 +1400,8 @@ def run() -> None:
     app.add_handler(CommandHandler("forest_split", forest_split_cmd))
     app.add_handler(CommandHandler("thinking_model", thinking_model_cmd))
     app.add_handler(CommandHandler("expert_group_model", expert_group_model_cmd))
+    app.add_handler(CommandHandler("weather_sub", weather_sub_cmd))
+    app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
 
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
