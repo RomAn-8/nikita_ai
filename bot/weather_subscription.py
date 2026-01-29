@@ -86,9 +86,18 @@ async def weather_subscription_task(
             logger.exception(f"Failed to send subscription start message: {e}")
 
         weather_records: list[tuple[str, str]] = []  # [(timestamp, weather_text), ...]
-        last_summary_time = datetime.now(SAMARA_TIMEZONE)
 
         try:
+            # Ждём 10 секунд перед первым сбором
+            try:
+                await asyncio.sleep(WEATHER_COLLECT_INTERVAL)
+            except asyncio.CancelledError:
+                raise
+
+            # Устанавливаем время начала отсчёта summary ПОСЛЕ задержки, перед первой записью
+            # Это гарантирует, что summary будет отправляться каждые summary_interval секунд
+            last_summary_time = datetime.now(SAMARA_TIMEZONE)
+
             while True:
                 try:
                     # Получаем текущую погоду через MCP
@@ -105,10 +114,10 @@ async def weather_subscription_task(
                     # Добавляем в список для summary
                     weather_records.append((timestamp_str, formatted_weather))
 
-                    # Проверяем, нужно ли отправить summary
+                    # Проверяем, нужно ли отправить summary (по времени, каждые summary_interval секунд)
                     elapsed = (current_time - last_summary_time).total_seconds()
                     if elapsed >= summary_interval:
-                        # Формируем summary
+                        # Формируем summary из всех накопленных записей
                         summary_lines = []
                         for ts, wt in weather_records:
                             summary_lines.append(f"{ts} — {wt}")
@@ -120,7 +129,7 @@ async def weather_subscription_task(
                             except Exception as e:
                                 logger.exception(f"Failed to send weather summary: {e}")
 
-                        # Очищаем записи и обновляем время
+                        # Очищаем записи и обновляем время последнего summary
                         weather_records.clear()
                         last_summary_time = current_time
 
