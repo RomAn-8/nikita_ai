@@ -18,6 +18,7 @@ from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, toke
 # NEW: summary-mode
 from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compress_history, clear_summary, summary_debug_cmd
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
+from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
 
 
@@ -62,6 +63,40 @@ def _get_content_from_raw(data: dict) -> str:
         return (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
     except Exception:
         return ""
+
+
+def _city_prepositional_case(city: str) -> str:
+    """
+    Склоняет название города в предложный падеж (где? в чём?).
+    Примеры: Москва -> Москве, Самара -> Самаре, Саратов -> Саратове, Томск -> Томске.
+    """
+    city = (city or "").strip()
+    if not city:
+        return city
+    
+    # Простая эвристика для склонения русских названий городов
+    city_lower = city.lower()
+    
+    # Если заканчивается на "а" (Москва, Самара, Тула) -> "е" (в Москве, в Самаре, в Туле)
+    if city_lower.endswith("а"):
+        return city[:-1] + "е"
+    
+    # Если заканчивается на "о" (Тула уже обработана, но на всякий случай)
+    if city_lower.endswith("о"):
+        return city[:-1] + "е"
+    
+    # Если заканчивается на "ь" (Тверь, Рязань) -> "и" (в Твери, в Рязани)
+    if city_lower.endswith("ь"):
+        return city[:-1] + "и"
+    
+    # Если заканчивается на согласную (Саратов, Томск, Новосибирск) -> "е" (в Саратове, в Томске, в Новосибирске)
+    # Проверяем последнюю букву
+    last_char = city_lower[-1]
+    if last_char not in "аеёиоуыэюяь":
+        return city + "е"
+    
+    # Если не подошло ни одно правило, возвращаем как есть
+    return city
 
 
 # -------------------- TEMPERATURE --------------------
@@ -1020,6 +1055,158 @@ async def weather_sub_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_reply_text(update, f"❌ Подписка на погоду для {city} не найдена.")
 
 
+# -------------------- DIGEST COMMAND --------------------
+
+async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для создания утренней сводки: погода + новости.
+    Формат: /digest <город погоды>, <тема новостей>
+    Пример: /digest Москва, технологии
+    """
+    if not update.message:
+        return
+    
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    
+    # Парсим аргументы: город и тема новостей (через запятую)
+    if not context.args:
+        await safe_reply_text(
+            update,
+            "Использование: /digest <город погоды>, <тема новостей>\n"
+            "Пример: /digest Москва, технологии\n"
+            "Пример: /digest Самара, спорт"
+        )
+        return
+    
+    # Объединяем все аргументы и разбиваем по запятой
+    full_text = " ".join(context.args)
+    parts = [p.strip() for p in full_text.split(",", 1)]
+    
+    if len(parts) < 2:
+        await safe_reply_text(
+            update,
+            "Неверный формат. Используйте: /digest <город>, <тема>\n"
+            "Пример: /digest Москва, технологии"
+        )
+        return
+    
+    city = parts[0]
+    news_topic = parts[1]
+    
+    if not city or not news_topic:
+        await safe_reply_text(update, "Город и тема новостей должны быть указаны.")
+        return
+    
+    await update.message.chat.send_action("typing")
+    
+    # Склоняем город в предложный падеж для использования в тексте
+    city_prep = _city_prepositional_case(city)
+    
+    # Получаем погоду через MCP
+    weather_text = await get_weather_via_mcp(city)
+    
+    # Получаем новости через MCP (5 новостей)
+    news_text = await get_news_via_mcp(news_topic, count=5)
+    
+    # Формируем Markdown файл
+    from datetime import datetime, timedelta, timezone
+    
+    # Самарское время (UTC+4)
+    SAMARA_OFFSET = timedelta(hours=4)
+    SAMARA_TIMEZONE = timezone(SAMARA_OFFSET)
+    now = datetime.now(SAMARA_TIMEZONE)
+    date_str = now.strftime("%d.%m.%Y %H:%M")
+    
+    markdown_content = f"""# Сводка погоды в {city_prep} и новости по теме {news_topic}
+**Дата:** {date_str}
+
+## Погода: {city}
+
+{weather_text}
+
+## Новости: {news_topic}
+
+{news_text}
+
+---
+*Сгенерировано автоматически*
+"""
+    
+    # Сохраняем Markdown файл
+    digest_dir = Path(__file__).resolve().parent / "digests"
+    digest_dir.mkdir(exist_ok=True)
+    filename = f"digest_{chat_id}_{now.strftime('%Y%m%d_%H%M%S')}.md"
+    filepath = digest_dir / filename
+    
+    try:
+        filepath.write_text(markdown_content, encoding="utf-8")
+    except Exception as e:
+        logger.exception(f"Failed to save digest file: {e}")
+        await safe_reply_text(update, f"Ошибка при сохранении файла: {e}")
+        return
+    
+    # Формируем текст для ИИ
+    mode = MODE_SUMMARY
+    temperature = get_temperature(context, chat_id)
+    model = get_model(context, chat_id) or None
+    
+    # Создаём промпт для ИИ
+    system_prompt = """Ты помощник, который формирует сводку на основе данных о погоде и новостях.
+Сделай сводку краткой, информативной и приятной для чтения.
+Используй данные о погоде и новостях, которые тебе предоставлены."""
+    
+    user_prompt = f"""Создай сводку на основе следующих данных:
+
+ПОГОДА:
+{weather_text}
+
+НОВОСТИ:
+{news_text}
+
+ВАЖНО: Начни сводку с фразы "Сводка погоды в {city_prep} и новости по теме {news_topic}!" (без кавычек).
+Затем сформируй краткую и информативную сводку, которая объединяет погоду и новости."""
+    
+    # Получаем ответ от ИИ через mode_summary
+    try:
+        messages = build_messages_with_summary(system_prompt, chat_id=chat_id, mode=mode)
+        messages.append({"role": "user", "content": user_prompt})
+        
+        data = chat_completion_raw(messages, temperature=temperature, model=model)
+        ai_response = _get_content_from_raw(data)
+        
+        if not ai_response:
+            ai_response = f"Погода: {weather_text}\n\nНовости: {news_text}"
+        
+        # Сохраняем в БД
+        db_add_message(chat_id, mode, "user", f"/digest {city}, {news_topic}")
+        db_add_message(chat_id, mode, "assistant", ai_response)
+        
+        # Сжимаем историю
+        try:
+            maybe_compress_history(chat_id, temperature=0.0, mode=mode)
+        except Exception:
+            pass
+        
+        # Отправляем ответ от ИИ
+        await safe_reply_text(update, ai_response)
+        
+        # Отправляем Markdown файл
+        try:
+            with open(filepath, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=filename,
+                    caption=f"📄 Markdown файл со сводкой: {city}, {news_topic}"
+                )
+        except Exception as e:
+            logger.exception(f"Failed to send digest file: {e}")
+            await safe_reply_text(update, f"⚠️ Сводка создана, но не удалось отправить файл: {e}")
+    
+    except Exception as e:
+        logger.exception(f"Failed to generate digest: {e}")
+        await safe_reply_text(update, f"Ошибка при создании сводки: {e}")
+
+
 # -------------------- TZ FLOW --------------------
 
 async def send_final_tz_json(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str, temperature: float, model: str | None) -> None:
@@ -1337,6 +1524,7 @@ async def post_init(app: Application) -> None:
         BotCommand("clear_memory", "Очистить память чата"),
         BotCommand("weather_sub", "Подписка на погоду (пример: /weather_sub Москва 30)"),
         BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
+        BotCommand("digest", "Утренняя сводка: погода + новости (пример: /digest Москва, технологии)"),
     ]
 
     if MODEL_GLM:
@@ -1402,6 +1590,7 @@ def run() -> None:
     app.add_handler(CommandHandler("expert_group_model", expert_group_model_cmd))
     app.add_handler(CommandHandler("weather_sub", weather_sub_cmd))
     app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
+    app.add_handler(CommandHandler("digest", digest_cmd))
 
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
