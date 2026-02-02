@@ -19,6 +19,7 @@ from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, toke
 from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compress_history, clear_summary, summary_debug_cmd
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
+from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
 
 
@@ -1362,6 +1363,73 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ---- CHAT MODES (text/thinking/experts/summary) ----
     if mode in ("text", "thinking", "experts", MODE_SUMMARY):
+        # Проверка на команды управления сайтом в режиме summary
+        if mode == MODE_SUMMARY:
+            # Команда "Подними сайт"
+            if re.match(r"^(?:подними|поднять|запусти|запустить)\s+сайт$", text, re.IGNORECASE):
+                await update.message.chat.send_action("typing")
+                result = await site_up_via_mcp()
+                # Сохраняем запрос и ответ в БД
+                db_add_message(chat_id, mode, "user", text)
+                db_add_message(chat_id, mode, "assistant", result)
+                # Сжимаем историю
+                try:
+                    maybe_compress_history(chat_id, temperature=0.0, mode=MODE_SUMMARY)
+                except Exception:
+                    pass
+                await safe_reply_text(update, result)
+                return
+            
+            # Команда "Сделай скрин" или "Сделай скриншот"
+            if re.match(r"^(?:сделай|создай|снять)\s+скрин(?:шот)?$", text, re.IGNORECASE):
+                await update.message.chat.send_action("typing")
+                screenshot_path = await site_screenshot_via_mcp()
+                
+                # Сохраняем запрос в БД
+                db_add_message(chat_id, mode, "user", text)
+                
+                # Проверяем, что путь к файлу получен
+                if screenshot_path and Path(screenshot_path).exists():
+                    try:
+                        # Отправляем PNG файл в Telegram
+                        with open(screenshot_path, "rb") as f:
+                            await update.message.reply_document(
+                                document=f,
+                                filename="site.png",
+                                caption="📸 Скриншот сайта"
+                            )
+                        # Сохраняем ответ в БД
+                        db_add_message(chat_id, mode, "assistant", f"Скриншот создан: {screenshot_path}")
+                    except Exception as e:
+                        logger.exception(f"Failed to send screenshot: {e}")
+                        await safe_reply_text(update, f"Скриншот создан, но не удалось отправить: {e}")
+                else:
+                    # Если файл не найден, отправляем текстовый ответ
+                    db_add_message(chat_id, mode, "assistant", screenshot_path)
+                    await safe_reply_text(update, screenshot_path)
+                
+                # Сжимаем историю
+                try:
+                    maybe_compress_history(chat_id, temperature=0.0, mode=MODE_SUMMARY)
+                except Exception:
+                    pass
+                return
+            
+            # Команда "Останови сайт"
+            if re.match(r"^(?:останови|остановить|выключи|выключить)\s+сайт$", text, re.IGNORECASE):
+                await update.message.chat.send_action("typing")
+                result = await site_down_via_mcp()
+                # Сохраняем запрос и ответ в БД
+                db_add_message(chat_id, mode, "user", text)
+                db_add_message(chat_id, mode, "assistant", result)
+                # Сжимаем историю
+                try:
+                    maybe_compress_history(chat_id, temperature=0.0, mode=MODE_SUMMARY)
+                except Exception:
+                    pass
+                await safe_reply_text(update, result)
+                return
+        
         # Проверка на запрос погоды в режиме summary (например: "Погода Москва" или "Погода Самара")
         weather_request_handled = False
         if mode == MODE_SUMMARY:
