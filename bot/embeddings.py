@@ -2,6 +2,7 @@
 Модуль для работы с эмбеддингами через OpenRouter API.
 """
 import json
+import math
 import re
 import sqlite3
 import logging
@@ -332,6 +333,93 @@ def clear_all_embeddings() -> int:
         conn.commit()
     
     return deleted_count
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Вычисляет cosine similarity между двумя векторами."""
+    if len(a) != len(b):
+        raise ValueError(f"Vectors must have the same length: {len(a)} != {len(b)}")
+    
+    dot_product = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    
+    return dot_product / (norm_a * norm_b)
+
+
+def search_relevant_chunks(
+    query_text: str,
+    model: str = EMBEDDING_MODEL,
+    top_k: int = 3,
+    min_similarity: float = 0.5,
+) -> list[dict[str, Any]]:
+    """
+    Ищет релевантные чанки по запросу пользователя.
+    
+    Args:
+        query_text: Текст запроса пользователя
+        model: Модель эмбеддингов
+        top_k: Количество возвращаемых чанков
+        min_similarity: Минимальная cosine similarity
+        
+    Returns:
+        Список словарей с ключами: text, chunk_index, similarity, doc_name
+    """
+    # Генерируем эмбеддинг для запроса
+    query_embeddings = generate_embeddings_batch([query_text], model=model)
+    if not query_embeddings:
+        return []
+    
+    query_embedding = query_embeddings[0]
+    
+    # Загружаем все чанки из БД
+    with open_db() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            """
+            SELECT doc_name, chunk_index, text, embedding_json, embedding_dim
+            FROM doc_chunks
+            WHERE model = ?
+            """,
+            (model,),
+        )
+        rows = cursor.fetchall()
+    
+    # Вычисляем similarity для каждого чанка
+    results = []
+    for row in rows:
+        try:
+            chunk_embedding = json.loads(row["embedding_json"])
+            similarity = cosine_similarity(query_embedding, chunk_embedding)
+            
+            if similarity >= min_similarity:
+                results.append({
+                    "text": row["text"],
+                    "chunk_index": row["chunk_index"],
+                    "similarity": similarity,
+                    "doc_name": row["doc_name"],
+                })
+        except Exception as e:
+            logger.exception(f"Error processing chunk {row['chunk_index']}: {e}")
+            continue
+    
+    # Сортируем по similarity (убывание) и берем top_k
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+    return results[:top_k]
+
+
+def has_embeddings(model: str = EMBEDDING_MODEL) -> bool:
+    """Проверяет, есть ли эмбеддинги в базе данных."""
+    with open_db() as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM doc_chunks WHERE model = ?",
+            (model,),
+        )
+        count = cursor.fetchone()[0]
+        return count > 0
 
 
 def process_readme_file(

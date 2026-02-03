@@ -21,7 +21,7 @@ from .mcp_weather import get_weather_via_mcp  # MCP-клиент для полу
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
-from .embeddings import process_readme_file  # Модуль для работы с эмбеддингами
+from .embeddings import process_readme_file, search_relevant_chunks, has_embeddings, EMBEDDING_MODEL  # Модуль для работы с эмбеддингами
 
 
 logger = logging.getLogger(__name__)
@@ -738,6 +738,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
         "/clear_memory — очистить память чата",
         "/embed_create — создать эмбеддинги из README.md (отправьте файл после команды)",
+        "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
     ]
 
     if MODEL_GLM:
@@ -772,6 +773,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
         "/clear_memory — очистить историю памяти",
+        "/embed_create — создать эмбеддинги из README.md",
+        "/rag_model — режим RAG (\"Ответь с RAG\" или \"Ответь без RAG\")",
     ]
 
     if MODEL_GLM:
@@ -1085,6 +1088,26 @@ async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         update,
         "✅ Ожидаю файл README.md.\n"
         "Пожалуйста, отправьте файл README.md в чат (как документ)."
+    )
+
+
+async def rag_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для активации режима RAG.
+    В этом режиме пользователь может явно указать, использовать ли поиск по эмбеддингам.
+    """
+    if not update.message:
+        return
+    
+    context.user_data["mode"] = "rag"
+    reset_tz(context)
+    reset_forest(context)
+    
+    await safe_reply_text(
+        update,
+        "✅ Режим RAG активирован. Используйте формат:\n"
+        "- \"Ответь с RAG <ваш вопрос>\" - для ответа с поиском по документам\n"
+        "- \"Ответь без RAG <ваш вопрос>\" - для обычного ответа"
     )
 
 
@@ -1475,6 +1498,111 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_forest_message(update, context, text, temperature=temperature, model=model)
         return
 
+    # ---- RAG MODE ----
+    if mode == "rag":
+        # Проверяем формат "Ответь с RAG <вопрос>"
+        rag_with_match = re.match(r"^ответь\s+с\s+rag\s+(.+)$", text, re.IGNORECASE)
+        if rag_with_match:
+            question_text = rag_with_match.group(1).strip()
+            if not question_text:
+                await safe_reply_text(update, "Пожалуйста, укажите вопрос после \"Ответь с RAG\".")
+                return
+            
+            # Проверяем наличие эмбеддингов
+            if not has_embeddings(EMBEDDING_MODEL):
+                await safe_reply_text(
+                    update,
+                    "⚠️ Эмбеддинги не найдены в базе данных.\n"
+                    "Сначала создайте эмбеддинги с помощью команды /embed_create."
+                )
+                return
+            
+            # Ищем релевантные чанки
+            try:
+                relevant_chunks = search_relevant_chunks(question_text, model=EMBEDDING_MODEL, top_k=3, min_similarity=0.5)
+            except Exception as e:
+                logger.exception(f"Error searching relevant chunks: {e}")
+                await safe_reply_text(update, f"Ошибка при поиске релевантных фрагментов: {e}")
+                return
+            
+            # Формируем контекст из чанков
+            if relevant_chunks:
+                context_parts = ["Релевантная информация из документов:\n"]
+                for i, chunk in enumerate(relevant_chunks, 1):
+                    context_parts.append(f"[Фрагмент {i} (схожесть: {chunk['similarity']:.2f})]:")
+                    context_parts.append(chunk["text"])
+                    context_parts.append("")
+                context_parts.append(f"Вопрос пользователя: {question_text}")
+                user_content = "\n".join(context_parts)
+            else:
+                # Если релевантных чанков не найдено, используем вопрос без контекста
+                user_content = question_text
+            
+            # Формируем сообщения для LLM
+            system_prompt = SYSTEM_PROMPT_TEXT
+            if memory_enabled:
+                messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+            else:
+                messages = [{"role": "system", "content": system_prompt}]
+            
+            messages.append({"role": "user", "content": user_content})
+            
+            # Отправляем запрос к LLM
+            try:
+                answer = chat_completion(messages, temperature=temperature, model=model)
+                answer = (answer or "").strip() or "Пустой ответ от модели."
+            except Exception as e:
+                await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+                return
+            
+            # Сохраняем в БД
+            db_add_message(chat_id, mode, "user", text)
+            db_add_message(chat_id, mode, "assistant", answer)
+            
+            await safe_reply_text(update, answer)
+            return
+        
+        # Проверяем формат "Ответь без RAG <вопрос>"
+        rag_without_match = re.match(r"^ответь\s+без\s+rag\s+(.+)$", text, re.IGNORECASE)
+        if rag_without_match:
+            question_text = rag_without_match.group(1).strip()
+            if not question_text:
+                await safe_reply_text(update, "Пожалуйста, укажите вопрос после \"Ответь без RAG\".")
+                return
+            
+            # Формируем сообщения для LLM без поиска по эмбеддингам
+            system_prompt = SYSTEM_PROMPT_TEXT
+            if memory_enabled:
+                messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+            else:
+                messages = [{"role": "system", "content": system_prompt}]
+            
+            messages.append({"role": "user", "content": question_text})
+            
+            # Отправляем запрос к LLM
+            try:
+                answer = chat_completion(messages, temperature=temperature, model=model)
+                answer = (answer or "").strip() or "Пустой ответ от модели."
+            except Exception as e:
+                await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+                return
+            
+            # Сохраняем в БД
+            db_add_message(chat_id, mode, "user", text)
+            db_add_message(chat_id, mode, "assistant", answer)
+            
+            await safe_reply_text(update, answer)
+            return
+        
+        # Если сообщение не соответствует формату
+        await safe_reply_text(
+            update,
+            "⚠️ Неверный формат. Используйте:\n"
+            "- \"Ответь с RAG <ваш вопрос>\" - для ответа с поиском по документам\n"
+            "- \"Ответь без RAG <ваш вопрос>\" - для обычного ответа"
+        )
+        return
+
     # ---- CHAT MODES (text/thinking/experts/summary) ----
     if mode in ("text", "thinking", "experts", MODE_SUMMARY):
         # Проверка на команды управления сайтом в режиме summary
@@ -1708,6 +1836,7 @@ async def post_init(app: Application) -> None:
         BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
         BotCommand("digest", "Утренняя сводка: погода + новости (пример: /digest Москва, технологии)"),
         BotCommand("embed_create", "Создать эмбеддинги из README.md (сначала отправьте файл)"),
+        BotCommand("rag_model", "Режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")"),
     ]
 
     if MODEL_GLM:
@@ -1778,6 +1907,7 @@ def run() -> None:
     app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("embed_create", embed_create_cmd))
+    app.add_handler(CommandHandler("rag_model", rag_model_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
