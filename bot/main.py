@@ -21,6 +21,7 @@ from .mcp_weather import get_weather_via_mcp  # MCP-клиент для полу
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
+from .embeddings import process_readme_file  # Модуль для работы с эмбеддингами
 
 
 logger = logging.getLogger(__name__)
@@ -736,6 +737,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
         "/clear_memory — очистить память чата",
+        "/embed_create — создать эмбеддинги из README.md (отправьте файл после команды)",
     ]
 
     if MODEL_GLM:
@@ -852,6 +854,15 @@ async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         clear_summary(chat_id, mode=MODE_SUMMARY)
     except Exception:
         pass
+    
+    # NEW: чистим эмбеддинги
+    try:
+        from .embeddings import clear_all_embeddings
+        deleted_count = clear_all_embeddings()
+        if deleted_count > 0:
+            logger.info(f"Cleared {deleted_count} embedding chunks from database")
+    except Exception as e:
+        logger.exception(f"Error clearing embeddings: {e}")
 
     await safe_reply_text(update, "Ок. Память чата очищена.")
 
@@ -1054,6 +1065,109 @@ async def weather_sub_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_reply_text(update, f"✅ Подписка на погоду для {city} остановлена.")
     else:
         await safe_reply_text(update, f"❌ Подписка на погоду для {city} не найдена.")
+
+
+# -------------------- EMBEDDINGS COMMAND --------------------
+
+async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для создания эмбеддингов из README.md файла.
+    Формат: /embed_create
+    После вызова команды нужно отправить файл README.md в чат (как документ).
+    """
+    if not update.message:
+        return
+    
+    # Устанавливаем флаг ожидания файла
+    context.user_data["waiting_for_readme"] = True
+    
+    await safe_reply_text(
+        update,
+        "✅ Ожидаю файл README.md.\n"
+        "Пожалуйста, отправьте файл README.md в чат (как документ)."
+    )
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обработчик документов: обрабатывает README.md файлы для создания эмбеддингов.
+    """
+    if not update.message or not update.message.document:
+        return
+    
+    document = update.message.document
+    file_name = document.file_name or ""
+    
+    # Проверяем, что это README.md
+    if file_name.lower() != "readme.md":
+        return  # Игнорируем другие файлы
+    
+    # Проверяем, ожидается ли файл для embed_create
+    waiting_for_readme = context.user_data.get("waiting_for_readme", False)
+    
+    try:
+        # Скачиваем файл
+        file = await context.bot.get_file(document.file_id)
+        
+        # Читаем содержимое
+        file_content_bytes = await file.download_as_bytearray()
+        file_content = file_content_bytes.decode("utf-8", errors="replace")
+        
+        # Если ожидается файл для embed_create, обрабатываем его сразу
+        if waiting_for_readme:
+            # Убираем флаг ожидания
+            context.user_data.pop("waiting_for_readme", None)
+            
+            # Показываем, что обрабатываем
+            await update.message.chat.send_action("typing")
+            
+            # Обрабатываем файл
+            result = process_readme_file(
+                file_content=file_content,
+                doc_name="README.md",
+                replace_existing=True,  # Удаляем старые записи и создаем новые
+            )
+            
+            if not result["success"]:
+                error_msg = result.get("error", "Неизвестная ошибка")
+                await safe_reply_text(update, f"❌ Ошибка при создании эмбеддингов: {error_msg}")
+                return
+            
+            # Формируем ответ со статистикой
+            stats = []
+            stats.append(f"✅ Эмбеддинги успешно созданы!")
+            stats.append(f"📄 Документ: {result['doc_name']}")
+            stats.append(f"📊 Символов: {result['text_length']}")
+            stats.append(f"📦 Чанков: {result['chunks_count']}")
+            stats.append(f"🔢 Размерность эмбеддинга: {result['embedding_dim']}")
+            stats.append(f"🤖 Модель: {result['model']}")
+            stats.append("")
+            stats.append("📝 Превью первого чанка:")
+            stats.append(result['first_chunk_preview'])
+            stats.append("")
+            stats.append("🔢 Первые 10 чисел первого вектора:")
+            first_vec_preview = ", ".join([f"{x:.6f}" for x in result['first_embedding_preview']])
+            stats.append(first_vec_preview)
+            
+            response_text = "\n".join(stats)
+            await safe_reply_text(update, response_text)
+        else:
+            # Сохраняем в user_data для возможного использования в будущем
+            context.user_data["last_readme_file"] = {
+                "file_name": file_name,
+                "content": file_content,
+                "file_id": document.file_id,
+            }
+            
+            # Уведомляем пользователя
+            await safe_reply_text(
+                update,
+                f"✅ Файл {file_name} получен ({len(file_content)} символов).\n"
+                f"Вызовите /embed_create для создания эмбеддингов."
+            )
+    except Exception as e:
+        logger.exception(f"Error processing document {file_name}: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при обработке файла {file_name}: {e}")
 
 
 # -------------------- DIGEST COMMAND --------------------
@@ -1593,6 +1707,7 @@ async def post_init(app: Application) -> None:
         BotCommand("weather_sub", "Подписка на погоду (пример: /weather_sub Москва 30)"),
         BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
         BotCommand("digest", "Утренняя сводка: погода + новости (пример: /digest Москва, технологии)"),
+        BotCommand("embed_create", "Создать эмбеддинги из README.md (сначала отправьте файл)"),
     ]
 
     if MODEL_GLM:
@@ -1605,6 +1720,9 @@ async def post_init(app: Application) -> None:
 
 def run() -> None:
     init_db()
+    # Инициализируем таблицу для эмбеддингов
+    from .embeddings import init_embeddings_table
+    init_embeddings_table()
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -1659,8 +1777,9 @@ def run() -> None:
     app.add_handler(CommandHandler("weather_sub", weather_sub_cmd))
     app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
+    app.add_handler(CommandHandler("embed_create", embed_create_cmd))
 
-
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
