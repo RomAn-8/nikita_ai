@@ -11,7 +11,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -1094,20 +1094,23 @@ async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def rag_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Команда для активации режима RAG.
-    В этом режиме пользователь может явно указать, использовать ли поиск по эмбеддингам.
+    В этом режиме доступны 3 подрежима: RAG+фильтр, RAG без фильтра, Без RAG.
     """
     if not update.message:
         return
     
     context.user_data["mode"] = "rag"
+    context.user_data["rag_submode"] = "rag_filter"  # Режим по умолчанию
     reset_tz(context)
     reset_forest(context)
     
     await safe_reply_text(
         update,
-        "✅ Режим RAG активирован. Используйте формат:\n"
-        "- \"Ответь с RAG <ваш вопрос>\" - для ответа с поиском по документам\n"
-        "- \"Ответь без RAG <ваш вопрос>\" - для обычного ответа"
+        "✅ Режим RAG активирован. Доступны 3 режима:\n"
+        "- \"RAG+фильтр\" или \"RAG+фильтр <вопрос>\" - поиск с порогом похожести (по умолчанию)\n"
+        "- \"RAG без фильтра\" или \"RAG без фильтра <вопрос>\" - поиск без порога\n"
+        "- \"Без RAG\" или \"Без RAG <вопрос>\" - обычный ответ без поиска\n\n"
+        "После выбора режима можно просто задавать вопросы - режим сохраняется."
     )
 
 
@@ -1500,15 +1503,67 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ---- RAG MODE ----
     if mode == "rag":
-        # Проверяем формат "Ответь с RAG <вопрос>"
-        rag_with_match = re.match(r"^ответь\s+с\s+rag\s+(.+)$", text, re.IGNORECASE)
-        if rag_with_match:
-            question_text = rag_with_match.group(1).strip()
-            if not question_text:
-                await safe_reply_text(update, "Пожалуйста, укажите вопрос после \"Ответь с RAG\".")
+        # Получаем текущий подрежим или устанавливаем по умолчанию
+        rag_submode = context.user_data.get("rag_submode", "rag_filter")
+        
+        # Проверяем команды переключения режима
+        question_text = None
+        new_submode = None
+        
+        # Проверяем "RAG+фильтр" или "RAG фильтр"
+        rag_filter_match = re.match(r"^rag\+?фильтр(?:\s+(.+))?$", text, re.IGNORECASE)
+        if rag_filter_match:
+            new_submode = "rag_filter"
+            question_text = rag_filter_match.group(1).strip() if rag_filter_match.group(1) else None
+        
+        # Проверяем "RAG без фильтра"
+        if not new_submode:
+            rag_no_filter_match = re.match(r"^rag\s+без\s+фильтра(?:\s+(.+))?$", text, re.IGNORECASE)
+            if rag_no_filter_match:
+                new_submode = "rag_no_filter"
+                question_text = rag_no_filter_match.group(1).strip() if rag_no_filter_match.group(1) else None
+        
+        # Проверяем "Без RAG"
+        if not new_submode:
+            no_rag_match = re.match(r"^без\s+rag(?:\s+(.+))?$", text, re.IGNORECASE)
+            if no_rag_match:
+                new_submode = "no_rag"
+                question_text = no_rag_match.group(1).strip() if no_rag_match.group(1) else None
+        
+        # Если режим переключен, обновляем и подтверждаем
+        if new_submode:
+            rag_submode = new_submode
+            context.user_data["rag_submode"] = rag_submode
+            mode_names = {
+                "rag_filter": "RAG+фильтр",
+                "rag_no_filter": "RAG без фильтра",
+                "no_rag": "Без RAG"
+            }
+            if question_text:
+                # Если вопрос указан сразу, продолжаем обработку
+                pass
+            else:
+                # Если только переключение режима, подтверждаем
+                await safe_reply_text(update, f"✅ Режим установлен: {mode_names[rag_submode]}. Задайте вопрос.")
                 return
-            
-            # Проверяем наличие эмбеддингов
+        
+        # Если вопрос не был извлечен из команды, используем весь текст как вопрос
+        if question_text is None:
+            question_text = text.strip()
+        
+        if not question_text:
+            await safe_reply_text(
+                update,
+                "Пожалуйста, задайте вопрос или используйте команды:\n"
+                "- \"RAG+фильтр\" или \"RAG+фильтр <вопрос>\"\n"
+                "- \"RAG без фильтра\" или \"RAG без фильтра <вопрос>\"\n"
+                "- \"Без RAG\" или \"Без RAG <вопрос>\""
+            )
+            return
+        
+        # Обработка в зависимости от подрежима
+        if rag_submode == "rag_filter":
+            # Режим RAG+фильтр
             if not has_embeddings(EMBEDDING_MODEL):
                 await safe_reply_text(
                     update,
@@ -1517,26 +1572,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 return
             
-            # Ищем релевантные чанки
             try:
-                relevant_chunks = search_relevant_chunks(question_text, model=EMBEDDING_MODEL, top_k=3, min_similarity=0.5)
+                relevant_chunks = search_relevant_chunks(
+                    question_text,
+                    model=EMBEDDING_MODEL,
+                    top_k=RAG_TOP_K,
+                    min_similarity=RAG_SIM_THRESHOLD,
+                    apply_threshold=True
+                )
             except Exception as e:
                 logger.exception(f"Error searching relevant chunks: {e}")
                 await safe_reply_text(update, f"Ошибка при поиске релевантных фрагментов: {e}")
                 return
             
-            # Формируем контекст из чанков
-            if relevant_chunks:
-                context_parts = ["Релевантная информация из документов:\n"]
-                for i, chunk in enumerate(relevant_chunks, 1):
-                    context_parts.append(f"[Фрагмент {i} (схожесть: {chunk['similarity']:.2f})]:")
-                    context_parts.append(chunk["text"])
-                    context_parts.append("")
-                context_parts.append(f"Вопрос пользователя: {question_text}")
-                user_content = "\n".join(context_parts)
-            else:
-                # Если релевантных чанков не найдено, используем вопрос без контекста
-                user_content = question_text
+            # Фильтруем чанки по порогу (дополнительная проверка)
+            filtered_chunks = [chunk for chunk in relevant_chunks if chunk["similarity"] >= RAG_SIM_THRESHOLD]
+            
+            if not filtered_chunks:
+                await safe_reply_text(update, "⚠️ Не нашла релевантных фрагментов.")
+                return
+            
+            # Формируем контекст для LLM
+            context_parts = ["Релевантная информация из документов:\n"]
+            for i, chunk in enumerate(filtered_chunks, 1):
+                context_parts.append(f"[Фрагмент {i} (doc_name={chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f})]:")
+                context_parts.append(chunk["text"])
+                context_parts.append("")
+            context_parts.append(f"Вопрос пользователя: {question_text}")
+            context_parts.append("\nВ конце ответа обязательно укажи список использованных фрагментов документа в формате:")
+            context_parts.append("[Фрагмент N: doc_name=..., chunk_index=..., score=...]")
+            user_content = "\n".join(context_parts)
             
             # Формируем сообщения для LLM
             system_prompt = SYSTEM_PROMPT_TEXT
@@ -1562,15 +1627,70 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_reply_text(update, answer)
             return
         
-        # Проверяем формат "Ответь без RAG <вопрос>"
-        rag_without_match = re.match(r"^ответь\s+без\s+rag\s+(.+)$", text, re.IGNORECASE)
-        if rag_without_match:
-            question_text = rag_without_match.group(1).strip()
-            if not question_text:
-                await safe_reply_text(update, "Пожалуйста, укажите вопрос после \"Ответь без RAG\".")
+        elif rag_submode == "rag_no_filter":
+            # Режим RAG без фильтра
+            if not has_embeddings(EMBEDDING_MODEL):
+                await safe_reply_text(
+                    update,
+                    "⚠️ Эмбеддинги не найдены в базе данных.\n"
+                    "Сначала создайте эмбеддинги с помощью команды /embed_create."
+                )
                 return
             
-            # Формируем сообщения для LLM без поиска по эмбеддингам
+            try:
+                relevant_chunks = search_relevant_chunks(
+                    question_text,
+                    model=EMBEDDING_MODEL,
+                    top_k=RAG_TOP_K,
+                    min_similarity=0.0,
+                    apply_threshold=False
+                )
+            except Exception as e:
+                logger.exception(f"Error searching relevant chunks: {e}")
+                await safe_reply_text(update, f"Ошибка при поиске релевантных фрагментов: {e}")
+                return
+            
+            if not relevant_chunks:
+                await safe_reply_text(update, "⚠️ Не нашла релевантных фрагментов.")
+                return
+            
+            # Формируем контекст для LLM
+            context_parts = ["Релевантная информация из документов:\n"]
+            for i, chunk in enumerate(relevant_chunks, 1):
+                context_parts.append(f"[Фрагмент {i} (doc_name={chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f})]:")
+                context_parts.append(chunk["text"])
+                context_parts.append("")
+            context_parts.append(f"Вопрос пользователя: {question_text}")
+            context_parts.append("\nВ конце ответа обязательно укажи список использованных фрагментов документа в формате:")
+            context_parts.append("[Фрагмент N: doc_name=..., chunk_index=..., score=...]")
+            user_content = "\n".join(context_parts)
+            
+            # Формируем сообщения для LLM
+            system_prompt = SYSTEM_PROMPT_TEXT
+            if memory_enabled:
+                messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+            else:
+                messages = [{"role": "system", "content": system_prompt}]
+            
+            messages.append({"role": "user", "content": user_content})
+            
+            # Отправляем запрос к LLM
+            try:
+                answer = chat_completion(messages, temperature=temperature, model=model)
+                answer = (answer or "").strip() or "Пустой ответ от модели."
+            except Exception as e:
+                await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+                return
+            
+            # Сохраняем в БД
+            db_add_message(chat_id, mode, "user", text)
+            db_add_message(chat_id, mode, "assistant", answer)
+            
+            await safe_reply_text(update, answer)
+            return
+        
+        elif rag_submode == "no_rag":
+            # Режим Без RAG - обычный ответ без поиска
             system_prompt = SYSTEM_PROMPT_TEXT
             if memory_enabled:
                 messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
@@ -1593,15 +1713,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             await safe_reply_text(update, answer)
             return
-        
-        # Если сообщение не соответствует формату
-        await safe_reply_text(
-            update,
-            "⚠️ Неверный формат. Используйте:\n"
-            "- \"Ответь с RAG <ваш вопрос>\" - для ответа с поиском по документам\n"
-            "- \"Ответь без RAG <ваш вопрос>\" - для обычного ответа"
-        )
-        return
 
     # ---- CHAT MODES (text/thinking/experts/summary) ----
     if mode in ("text", "thinking", "experts", MODE_SUMMARY):

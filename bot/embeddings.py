@@ -355,6 +355,7 @@ def search_relevant_chunks(
     model: str = EMBEDDING_MODEL,
     top_k: int = 3,
     min_similarity: float = 0.5,
+    apply_threshold: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Ищет релевантные чанки по запросу пользователя.
@@ -363,7 +364,8 @@ def search_relevant_chunks(
         query_text: Текст запроса пользователя
         model: Модель эмбеддингов
         top_k: Количество возвращаемых чанков
-        min_similarity: Минимальная cosine similarity
+        min_similarity: Минимальная cosine similarity (используется только если apply_threshold=True)
+        apply_threshold: Если True, фильтровать чанки по min_similarity. Если False, возвращать все найденные чанки до top_k
         
     Returns:
         Список словарей с ключами: text, chunk_index, similarity, doc_name
@@ -395,7 +397,9 @@ def search_relevant_chunks(
             chunk_embedding = json.loads(row["embedding_json"])
             similarity = cosine_similarity(query_embedding, chunk_embedding)
             
-            if similarity >= min_similarity:
+            # Если apply_threshold=False, добавляем все чанки независимо от similarity
+            # Если apply_threshold=True, фильтруем по min_similarity
+            if not apply_threshold or similarity >= min_similarity:
                 results.append({
                     "text": row["text"],
                     "chunk_index": row["chunk_index"],
