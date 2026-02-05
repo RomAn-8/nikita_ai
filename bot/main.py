@@ -1601,6 +1601,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context_parts.append(f"Вопрос пользователя: {question_text}")
             context_parts.append("\nВ конце ответа обязательно укажи список использованных фрагментов документа в формате:")
             context_parts.append("[Фрагмент N: doc_name=..., chunk_index=..., score=...]")
+            context_parts.append('Цитата: "точная дословная выдержка из текста фрагмента (1-2 предложения)"')
+            context_parts.append("\nВажно:")
+            context_parts.append("- Цитата должна быть точной дословной выдержкой из текста фрагмента (не перефразирование)")
+            context_parts.append("- Цитата должна быть короткой (1-2 предложения)")
+            context_parts.append("- Цитата должна быть наиболее релевантной частью фрагмента для ответа на вопрос")
+            context_parts.append("- Каждый использованный фрагмент должен иметь свою цитату")
             user_content = "\n".join(context_parts)
             
             # Формируем сообщения для LLM
@@ -1663,6 +1669,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context_parts.append(f"Вопрос пользователя: {question_text}")
             context_parts.append("\nВ конце ответа обязательно укажи список использованных фрагментов документа в формате:")
             context_parts.append("[Фрагмент N: doc_name=..., chunk_index=..., score=...]")
+            context_parts.append('Цитата: "точная дословная выдержка из текста фрагмента (1-2 предложения)"')
+            context_parts.append("\nВажно:")
+            context_parts.append("- Цитата должна быть точной дословной выдержкой из текста фрагмента (не перефразирование)")
+            context_parts.append("- Цитата должна быть короткой (1-2 предложения)")
+            context_parts.append("- Цитата должна быть наиболее релевантной частью фрагмента для ответа на вопрос")
+            context_parts.append("- Каждый использованный фрагмент должен иметь свою цитату")
             user_content = "\n".join(context_parts)
             
             # Формируем сообщения для LLM
