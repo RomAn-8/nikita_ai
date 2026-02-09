@@ -124,7 +124,7 @@ MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
 
 DB_PATH = Path(__file__).resolve().parent / "bot_memory.sqlite3"
 MEMORY_LIMIT_MESSAGES = 30  # сколько последних сообщений хранить в контексте для LLM
-MEMORY_CHAT_MODES = ("text", "thinking", "experts")  # общая память между этими режимами
+MEMORY_CHAT_MODES = ("text", "thinking", "experts", "rag")  # общая память между этими режимами
 
 
 def open_db() -> sqlite3.Connection:
@@ -737,7 +737,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
         "/clear_memory — очистить память чата",
-        "/embed_create — создать эмбеддинги из README.md (отправьте файл после команды)",
+        "/clear_embeddings — удалить все эмбеддинги",
+        "/embed_create — создать эмбеддинги из .md файла (отправьте файл после команды)",
         "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
     ]
 
@@ -773,7 +774,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
         "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
         "/clear_memory — очистить историю памяти",
-        "/embed_create — создать эмбеддинги из README.md",
+        "/clear_embeddings — удалить все эмбеддинги",
+        "/embed_create — создать эмбеддинги из .md файла",
         "/rag_model — режим RAG (\"Ответь с RAG\" или \"Ответь без RAG\")",
     ]
 
@@ -857,17 +859,23 @@ async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         clear_summary(chat_id, mode=MODE_SUMMARY)
     except Exception:
         pass
-    
-    # NEW: чистим эмбеддинги
+
+    await safe_reply_text(update, "Ок. Память чата очищена.")
+
+
+async def clear_embeddings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда для удаления всех эмбеддингов из базы данных."""
     try:
         from .embeddings import clear_all_embeddings
         deleted_count = clear_all_embeddings()
         if deleted_count > 0:
             logger.info(f"Cleared {deleted_count} embedding chunks from database")
+            await safe_reply_text(update, f"✅ Удалено {deleted_count} эмбеддингов из базы данных.")
+        else:
+            await safe_reply_text(update, "ℹ️ Эмбеддинги не найдены в базе данных.")
     except Exception as e:
         logger.exception(f"Error clearing embeddings: {e}")
-
-    await safe_reply_text(update, "Ок. Память чата очищена.")
+        await safe_reply_text(update, f"❌ Ошибка при удалении эмбеддингов: {e}")
 
 
 async def model_glm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1074,9 +1082,9 @@ async def weather_sub_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Команда для создания эмбеддингов из README.md файла.
+    Команда для создания эмбеддингов из .md файла.
     Формат: /embed_create
-    После вызова команды нужно отправить файл README.md в чат (как документ).
+    После вызова команды нужно отправить любой .md файл в чат (как документ).
     """
     if not update.message:
         return
@@ -1086,8 +1094,8 @@ async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     await safe_reply_text(
         update,
-        "✅ Ожидаю файл README.md.\n"
-        "Пожалуйста, отправьте файл README.md в чат (как документ)."
+        "✅ Ожидаю .md файл.\n"
+        "Пожалуйста, отправьте любой .md файл в чат (как документ)."
     )
 
 
@@ -1116,7 +1124,7 @@ async def rag_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Обработчик документов: обрабатывает README.md файлы для создания эмбеддингов.
+    Обработчик документов: обрабатывает .md файлы для создания эмбеддингов.
     """
     if not update.message or not update.message.document:
         return
@@ -1124,9 +1132,9 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     document = update.message.document
     file_name = document.file_name or ""
     
-    # Проверяем, что это README.md
-    if file_name.lower() != "readme.md":
-        return  # Игнорируем другие файлы
+    # Проверяем, что это .md файл
+    if not file_name.lower().endswith(".md"):
+        return  # Игнорируем файлы не .md формата
     
     # Проверяем, ожидается ли файл для embed_create
     waiting_for_readme = context.user_data.get("waiting_for_readme", False)
@@ -1150,7 +1158,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # Обрабатываем файл
             result = process_readme_file(
                 file_content=file_content,
-                doc_name="README.md",
+                doc_name=file_name,  # Используем реальное имя файла
                 replace_existing=True,  # Удаляем старые записи и создаем новые
             )
             
@@ -1189,7 +1197,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await safe_reply_text(
                 update,
                 f"✅ Файл {file_name} получен ({len(file_content)} символов).\n"
-                f"Вызовите /embed_create для создания эмбеддингов."
+                f"Вызовите /embed_create, затем отправьте этот файл для создания эмбеддингов."
             )
     except Exception as e:
         logger.exception(f"Error processing document {file_name}: {e}")
@@ -1955,10 +1963,11 @@ async def post_init(app: Application) -> None:
         BotCommand("ch_temperature", "Показать/изменить температуру (пример: /ch_temperature 0.7)"),
         BotCommand("ch_memory", "Память ВКЛ/ВЫКЛ (пример: /ch_memory off)"),
         BotCommand("clear_memory", "Очистить память чата"),
+        BotCommand("clear_embeddings", "Удалить все эмбеддинги"),
         BotCommand("weather_sub", "Подписка на погоду (пример: /weather_sub Москва 30)"),
         BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
         BotCommand("digest", "Утренняя сводка: погода + новости (пример: /digest Москва, технологии)"),
-        BotCommand("embed_create", "Создать эмбеддинги из README.md (сначала отправьте файл)"),
+        BotCommand("embed_create", "Создать эмбеддинги из .md файла (сначала отправьте файл)"),
         BotCommand("rag_model", "Режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")"),
     ]
 
@@ -2012,6 +2021,7 @@ def run() -> None:
     app.add_handler(CommandHandler("ch_temperature", ch_temperature_cmd))
     app.add_handler(CommandHandler("ch_memory", ch_memory_cmd))
     app.add_handler(CommandHandler("clear_memory", clear_memory_cmd))
+    app.add_handler(CommandHandler("clear_embeddings", clear_embeddings_cmd))
 
     if MODEL_GLM:
         app.add_handler(CommandHandler("model_glm", model_glm_cmd))

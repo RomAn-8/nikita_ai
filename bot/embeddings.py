@@ -12,12 +12,11 @@ from typing import Any
 
 import requests
 
-from .config import OPENROUTER_API_KEY
+from .config import OPENROUTER_API_KEY, EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 
 # Константы
-EMBEDDING_MODEL = "google/gemini-embedding-001"
 OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 CHUNK_SIZE = 1000  # символов
 CHUNK_OVERLAP = 150  # символов
@@ -208,22 +207,70 @@ def generate_embeddings_batch(texts: list[str], model: str = EMBEDDING_MODEL) ->
         "input": texts,
     }
     
+    # Логируем модель, которую используем
+    logger.info(f"Requesting embeddings from model: {model}, texts count: {len(texts)}")
+    
     try:
         response = requests.post(OPENROUTER_EMBEDDINGS_URL, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
+        
+        # Логируем статус и ответ для отладки
+        logger.info(f"Embeddings API response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            error_text = response.text[:500]  # Первые 500 символов ошибки
+            logger.error(f"Embeddings API error ({response.status_code}): {error_text}")
+            raise ValueError(f"API вернул ошибку {response.status_code}: {error_text}")
+        
         data = response.json()
+        
+        # Проверяем наличие ошибки в ответе
+        if "error" in data:
+            error_info = data.get("error", {})
+            error_message = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+            error_type = error_info.get("type", "Unknown") if isinstance(error_info, dict) else "Unknown"
+            logger.error(f"OpenRouter API error: {error_type} - {error_message}")
+            logger.error(f"Full error response: {data}")
+            logger.error(f"Model used: {model}")
+            raise ValueError(f"Ошибка API (модель: {model}): {error_message}")
+        
+        # Проверяем структуру ответа
+        if "data" not in data:
+            logger.error(f"Unexpected API response structure: {list(data.keys())}")
+            logger.error(f"Full response: {str(data)[:500]}")
+            raise ValueError(f"API вернул неожиданную структуру ответа. Ключи: {list(data.keys())}")
         
         # Извлекаем эмбеддинги из ответа
         embeddings = []
-        for item in data.get("data", []):
+        data_items = data.get("data", [])
+        
+        if len(data_items) != len(texts):
+            logger.warning(f"Mismatch: API вернул {len(data_items)} эмбеддингов, ожидалось {len(texts)}")
+        
+        for i, item in enumerate(data_items):
             embedding = item.get("embedding", [])
             if embedding:
                 embeddings.append(embedding)
+            else:
+                logger.warning(f"Эмбеддинг {i} пустой или отсутствует в ответе API")
+        
+        if len(embeddings) != len(texts):
+            error_msg = (
+                f"Несоответствие количества эмбеддингов: получено {len(embeddings)}, ожидалось {len(texts)}. "
+                f"API вернул {len(data_items)} элементов в data. "
+                f"Проверьте логи для деталей."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         return embeddings
+    except requests.exceptions.RequestException as e:
+        logger.exception(f"Network error generating embeddings: {e}")
+        raise ValueError(f"Ошибка сети при запросе эмбеддингов: {e}")
+    except ValueError:
+        raise  # Пробрасываем ValueError как есть
     except Exception as e:
         logger.exception(f"Error generating embeddings: {e}")
-        raise
+        raise ValueError(f"Неожиданная ошибка при генерации эмбеддингов: {e}")
 
 
 def save_chunks_to_db(
