@@ -1,3 +1,5 @@
+# Тестовый комментарий для PR
+
 import os
 import json
 import re
@@ -20,7 +22,30 @@ from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compres
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
-from .mcp_client import get_git_branch  # MCP-клиент для получения git ветки
+from .mcp_client import get_git_branch, get_pr_diff, get_pr_files, get_pr_info  # MCP-клиент для получения git ветки и PR данных
+
+# Импортируем функции для анализа PR из скрипта
+import sys
+from pathlib import Path
+REVIEW_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "review_pr.py"
+if REVIEW_SCRIPT_PATH.exists():
+    # Добавляем корень проекта в путь для импорта
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    try:
+        from scripts.review_pr import (
+            extract_keywords_from_text,
+            get_rag_context as get_rag_context_for_pr,
+            format_pr_files,
+            create_review_prompt,
+        )
+        PR_REVIEW_AVAILABLE = True
+    except ImportError as e:
+        PR_REVIEW_AVAILABLE = False
+        logger.warning(f"PR review functions not available: {e}")
+else:
+    PR_REVIEW_AVAILABLE = False
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
 from .embeddings import process_readme_file, process_docs_folder, search_relevant_chunks, has_embeddings, list_indexed_documents, EMBEDDING_MODEL  # Модуль для работы с эмбеддингами
 
@@ -1425,6 +1450,115 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_reply_text(update, f"❌ Ошибка при обработке файла {file_name}: {e}")
 
 
+# -------------------- PR REVIEW COMMAND --------------------
+
+async def review_pr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для анализа Pull Request с использованием RAG и MCP.
+    Формат: /review_pr <номер_pr>
+    Пример: /review_pr 123
+    """
+    if not PR_REVIEW_AVAILABLE:
+        await safe_reply_text(
+            update,
+            "❌ Функция анализа PR недоступна. Убедитесь, что скрипт review_pr.py существует."
+        )
+        return
+    
+    if not update.message:
+        return
+    
+    # Парсим аргументы
+    if not context.args or len(context.args) != 1:
+        await safe_reply_text(
+            update,
+            "Использование: /review_pr <номер_pr>\n"
+            "Пример: /review_pr 123\n\n"
+            "Убедитесь, что:\n"
+            "1. MCP сервер python-sdk запущен (http://127.0.0.1:8000/mcp)\n"
+            "2. В переменных окружения установлен GITHUB_TOKEN (или добавьте в .env)"
+        )
+        return
+    
+    try:
+        pr_number = int(context.args[0])
+    except ValueError:
+        await safe_reply_text(update, f"❌ Номер PR должен быть числом, получено: {context.args[0]}")
+        return
+    
+    await update.message.chat.send_action("typing")
+    
+    # Получаем GitHub token из переменных окружения (пробуем GB_TOKEN, затем GITHUB_TOKEN)
+    github_token = os.getenv("GB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+    if not github_token:
+        await safe_reply_text(
+            update,
+            "❌ GitHub token не найден в переменных окружения.\n"
+            "Добавьте GB_TOKEN или GITHUB_TOKEN в .env файл или установите как переменную окружения."
+        )
+        return
+    
+    # Параметры репозитория (nikita_ai)
+    owner = "RomAn-8"
+    repo = "nikita_ai"
+    
+    try:
+        # 1. Получаем данные PR через MCP
+        await safe_reply_text(update, f"📥 Получаю данные PR #{pr_number}...")
+        pr_info = await get_pr_info(owner, repo, pr_number, github_token)
+        if not pr_info:
+            await safe_reply_text(update, "❌ Не удалось получить информацию о PR. Проверьте номер PR и доступность MCP сервера.")
+            return
+        
+        pr_files = await get_pr_files(owner, repo, pr_number, github_token)
+        if pr_files is None:
+            await safe_reply_text(update, "❌ Не удалось получить список файлов PR.")
+            return
+        
+        pr_diff = await get_pr_diff(owner, repo, pr_number, github_token)
+        if not pr_diff:
+            await safe_reply_text(update, "❌ Не удалось получить diff PR.")
+            return
+        
+        pr_title = pr_info.get("title", "N/A")
+        await safe_reply_text(update, f"✅ Получены данные PR: {pr_title}\n📁 Файлов изменено: {len(pr_files)}\n🔍 Ищу релевантную документацию...")
+        
+        # 2. Получаем RAG контекст
+        rag_context = await get_rag_context_for_pr(pr_info, pr_files, pr_diff)
+        if rag_context:
+            await safe_reply_text(update, "✅ Найдена релевантная документация\n🤖 Генерирую ревью...")
+        else:
+            await safe_reply_text(update, "⚠️ Релевантная документация не найдена\n🤖 Генерирую ревью...")
+        
+        # 3. Генерируем ревью через LLM
+        messages = create_review_prompt(pr_info, pr_files, pr_diff, rag_context)
+        review_text = chat_completion(messages, temperature=0.3, model=OPENROUTER_MODEL)
+        
+        if not review_text or not review_text.strip():
+            await safe_reply_text(update, "❌ LLM вернул пустое ревью.")
+            return
+        
+        # 4. Отправляем результат (разбиваем на части, если слишком длинный)
+        max_length = 4000  # Telegram limit
+        if len(review_text) <= max_length:
+            await safe_reply_text(update, f"📝 **Ревью PR #{pr_number}:**\n\n{review_text}", parse_mode="Markdown")
+        else:
+            # Отправляем первую часть
+            await safe_reply_text(update, f"📝 **Ревью PR #{pr_number}:**\n\n{review_text[:max_length]}...", parse_mode="Markdown")
+            # Отправляем остаток
+            remaining = review_text[max_length:]
+            while remaining:
+                chunk = remaining[:max_length]
+                remaining = remaining[max_length:]
+                await safe_reply_text(update, chunk, parse_mode="Markdown")
+        
+        await safe_reply_text(update, "✅ Анализ завершен!")
+        
+    except Exception as e:
+        logger.exception(f"Error reviewing PR #{pr_number}: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при анализе PR: {e}")
+
+
 # -------------------- DIGEST COMMAND --------------------
 
 async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2191,6 +2325,9 @@ async def post_init(app: Application) -> None:
         BotCommand("embed_create", "Создать эмбеддинги из .md файла (сначала отправьте файл)"),
         BotCommand("rag_model", "Режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")"),
     ]
+    
+    if PR_REVIEW_AVAILABLE:
+        cmds.append(BotCommand("review_pr", "Анализ Pull Request (пример: /review_pr 123)"))
 
     if MODEL_GLM:
         cmds.append(BotCommand("model_glm", f"Модель: {_short_model_name(MODEL_GLM)}"))
@@ -2260,6 +2397,8 @@ def run() -> None:
     app.add_handler(CommandHandler("weather_sub", weather_sub_cmd))
     app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
+    if PR_REVIEW_AVAILABLE:
+        app.add_handler(CommandHandler("review_pr", review_pr_cmd))
     app.add_handler(CommandHandler("embed_create", embed_create_cmd))
     app.add_handler(CommandHandler("embed_docs", embed_docs_cmd))
     app.add_handler(CommandHandler("rag_model", rag_model_cmd))
