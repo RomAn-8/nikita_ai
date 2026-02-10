@@ -1,3 +1,5 @@
+# Тестовый комментарий для PR
+
 import os
 import json
 import re
