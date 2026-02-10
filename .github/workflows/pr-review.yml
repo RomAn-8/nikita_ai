@@ -1,0 +1,99 @@
+name: PR Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Запускаем только для репозитория nikita_ai
+    if: github.repository == 'RomAn-8/nikita_ai'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout nikita_ai
+        uses: actions/checkout@v4
+        with:
+          path: nikita_ai
+
+      - name: Checkout python-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: RomAn-8/python-sdk
+          path: python-sdk
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install nikita_ai dependencies
+        working-directory: nikita_ai
+        run: |
+          uv sync
+
+      - name: Install python-sdk dependencies
+        working-directory: python-sdk
+        run: |
+          uv sync
+
+      - name: Start MCP server
+        working-directory: python-sdk
+        run: |
+          nohup uv run mcp-server-demo/mcpserver_quickstart.py > /tmp/mcp_server.log 2>&1 &
+          echo $! > /tmp/mcp_server.pid
+          sleep 10  # Даем серверу время на запуск
+          # Проверяем, что сервер запустился
+          python3 -c "
+          import time
+          import urllib.request
+          import urllib.error
+          for i in range(30):
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:8000/mcp', timeout=2)
+                  print('MCP server is running')
+                  exit(0)
+              except (urllib.error.URLError, OSError):
+                  if i == 29:
+                      print('MCP server failed to start')
+                      exit(1)
+                  time.sleep(1)
+          "
+        env:
+          # Добавьте здесь переменные окружения для MCP сервера, если нужны
+          # Например, API ключи для инструментов
+
+      - name: Run PR review
+        working-directory: nikita_ai
+        run: |
+          python scripts/review_pr.py \
+            ${{ github.repository_owner }} \
+            ${{ github.event.repository.name }} \
+            ${{ github.event.pull_request.number }} \
+            ${{ secrets.GB_TOKEN || secrets.GITHUB_TOKEN }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MCP_SERVER_URL: "http://127.0.0.1:8000/mcp"
+
+      - name: Stop MCP server
+        if: always()
+        run: |
+          if [ -f /tmp/mcp_server.pid ]; then
+            kill $(cat /tmp/mcp_server.pid) || true
+            rm /tmp/mcp_server.pid
+          fi
+          # Показываем логи сервера для отладки
+          if [ -f /tmp/mcp_server.log ]; then
+            echo "=== MCP Server Logs ==="
+            cat /tmp/mcp_server.log
+          fi

@@ -1,14 +1,18 @@
 """
-Клиент для вызова MCP-инструмента git_branch.
+Клиент для вызова MCP-инструментов.
 
-Ожидается, что где‑то запущен MCP‑сервер со строковым инструментом:
-    @mcp.tool()
-    async def git_branch(repo_path: str | None = None) -> str: ...
+Ожидается, что где‑то запущен MCP‑сервер с инструментами:
+    - git_branch
+    - get_pr_diff
+    - get_pr_files
+    - get_pr_info
 
-Этот модуль подключается к такому серверу по Streamable HTTP и вызывает tool `git_branch`.
+Этот модуль подключается к такому серверу по Streamable HTTP и вызывает инструменты.
 """
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +22,8 @@ from mcp.types import TextContent
 
 logger = logging.getLogger(__name__)
 
-MCP_SERVER_URL = "http://127.0.0.1:8000/mcp"  # Адрес MCP-сервера
+# Адрес MCP-сервера (можно переопределить через переменную окружения)
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
 
 async def get_git_branch(repo_path: str | None = None) -> str | None:
@@ -72,3 +77,186 @@ async def get_git_branch(repo_path: str | None = None) -> str | None:
     except Exception:
         # В случае любой ошибки возвращаем None
         return None
+
+
+async def get_pr_diff(owner: str, repo: str, pr_number: int, github_token: str) -> str | None:
+    """
+    Асинхронный вызов MCP-инструмента `get_pr_diff`.
+
+    Args:
+        owner: Владелец репозитория
+        repo: Название репозитория
+        pr_number: Номер PR
+        github_token: GitHub token
+
+    Returns:
+        Diff строка или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+
+                result = await session.call_tool(
+                    "get_pr_diff",
+                    arguments={
+                        "owner": owner,
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "github_token": github_token,
+                    },
+                )
+
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+
+        if not parts:
+            return None
+
+        diff_text = " ".join(p.strip() for p in parts if p.strip())
+        # Проверяем, что это не сообщение об ошибке от MCP сервера
+        # Ошибки обычно начинаются с "Ошибка:" или содержат "error:" в начале
+        if diff_text.startswith("Ошибка") or diff_text.lower().startswith("error:"):
+            logger.error(f"Error getting PR diff: {diff_text}")
+            raise ValueError(diff_text)
+
+        return diff_text
+
+    except ValueError:
+        raise
+    except ConnectionError as e:
+        logger.exception(f"Connection error to MCP server: {e}")
+        raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower() or "timeout" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+        logger.exception(f"Exception getting PR diff: {e}")
+        raise ValueError(f"Ошибка при получении diff PR через MCP: {e}")
+
+
+async def get_pr_files(owner: str, repo: str, pr_number: int, github_token: str) -> list[dict[str, Any]] | None:
+    """
+    Асинхронный вызов MCP-инструмента `get_pr_files`.
+
+    Args:
+        owner: Владелец репозитория
+        repo: Название репозитория
+        pr_number: Номер PR
+        github_token: GitHub token
+
+    Returns:
+        Список словарей с информацией о файлах или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+
+                result = await session.call_tool(
+                    "get_pr_files",
+                    arguments={
+                        "owner": owner,
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "github_token": github_token,
+                    },
+                )
+
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+
+        if not parts:
+            logger.error("MCP tool get_pr_files returned empty response")
+            return None
+
+        files_json = " ".join(p.strip() for p in parts if p.strip())
+        # Проверяем, что это не сообщение об ошибке от MCP сервера
+        # Ошибки обычно начинаются с "Ошибка:" или содержат "error:" в начале
+        if files_json.startswith("Ошибка") or files_json.lower().startswith("error:"):
+            logger.error(f"Error getting PR files: {files_json}")
+            raise ValueError(files_json)
+
+        try:
+            return json.loads(files_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse PR files JSON: {e}. Response: {files_json[:200]}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+
+    except ValueError:
+        raise
+    except ConnectionError as e:
+        logger.exception(f"Connection error to MCP server: {e}")
+        raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower() or "timeout" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+        logger.exception(f"Exception getting PR files: {e}")
+        raise ValueError(f"Ошибка при получении файлов PR через MCP: {e}")
+
+
+async def get_pr_info(owner: str, repo: str, pr_number: int, github_token: str) -> dict[str, Any] | None:
+    """
+    Асинхронный вызов MCP-инструмента `get_pr_info`.
+
+    Args:
+        owner: Владелец репозитория
+        repo: Название репозитория
+        pr_number: Номер PR
+        github_token: GitHub token
+
+    Returns:
+        Словарь с информацией о PR или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+
+                result = await session.call_tool(
+                    "get_pr_info",
+                    arguments={
+                        "owner": owner,
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "github_token": github_token,
+                    },
+                )
+
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+
+        if not parts:
+            return None
+
+        info_json = " ".join(p.strip() for p in parts if p.strip())
+        # Проверяем, что это не сообщение об ошибке от MCP сервера
+        # Ошибки обычно начинаются с "Ошибка:" или содержат "error:" в начале
+        if info_json.startswith("Ошибка") or info_json.lower().startswith("error:"):
+            logger.error(f"Error getting PR info: {info_json}")
+            raise ValueError(info_json)
+
+        try:
+            return json.loads(info_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse PR info JSON: {e}. Response: {info_json[:200]}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+
+    except ValueError:
+        raise
+    except ConnectionError as e:
+        logger.exception(f"Connection error to MCP server: {e}")
+        raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower() or "timeout" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
+        logger.exception(f"Exception getting PR info: {e}")
+        raise ValueError(f"Ошибка при получении информации о PR через MCP: {e}")
