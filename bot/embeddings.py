@@ -473,6 +473,16 @@ def has_embeddings(model: str = EMBEDDING_MODEL) -> bool:
         return count > 0
 
 
+def list_indexed_documents(model: str = EMBEDDING_MODEL) -> list[str]:
+    """Возвращает список проиндексированных документов."""
+    with open_db() as conn:
+        cursor = conn.execute(
+            "SELECT DISTINCT doc_name FROM doc_chunks WHERE model = ? ORDER BY doc_name",
+            (model,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
 def process_readme_file(
     file_content: str,
     doc_name: str = "README.md",
@@ -606,4 +616,143 @@ def process_readme_file(
         return {
             "success": False,
             "error": str(e),
+        }
+
+
+def process_docs_folder(
+    docs_folder: Path | str | None = None,
+    model: str = EMBEDDING_MODEL,
+    replace_existing: bool = True,
+) -> dict[str, Any]:
+    """
+    Обрабатывает все .md файлы из папки docs/: нормализует, разбивает на чанки, 
+    генерирует эмбеддинги, сохраняет в БД.
+    
+    Args:
+        docs_folder: Путь к папке docs/ (по умолчанию: корень проекта/docs/)
+        model: Модель эмбеддингов
+        replace_existing: Если True, удаляет старые записи перед созданием новых
+        
+    Returns:
+        Словарь со статистикой: {
+            "success": bool,
+            "files_processed": int,
+            "total_chunks": int,
+            "errors": list[str],
+            "results": list[dict],
+        }
+    """
+    try:
+        # Определяем путь к папке docs/
+        if docs_folder is None:
+            # Путь относительно корня проекта (nikita_ai/docs/)
+            project_root = Path(__file__).resolve().parent.parent
+            docs_folder = project_root / "docs"
+        else:
+            docs_folder = Path(docs_folder)
+        
+        if not docs_folder.exists():
+            return {
+                "success": False,
+                "error": f"Папка {docs_folder} не существует",
+                "files_processed": 0,
+                "total_chunks": 0,
+                "errors": [],
+                "results": [],
+            }
+        
+        if not docs_folder.is_dir():
+            return {
+                "success": False,
+                "error": f"{docs_folder} не является папкой",
+                "files_processed": 0,
+                "total_chunks": 0,
+                "errors": [],
+                "results": [],
+            }
+        
+        # Находим все .md файлы рекурсивно
+        md_files = list(docs_folder.rglob("*.md"))
+        
+        if not md_files:
+            return {
+                "success": False,
+                "error": f"В папке {docs_folder} не найдено .md файлов",
+                "files_processed": 0,
+                "total_chunks": 0,
+                "errors": [],
+                "results": [],
+            }
+        
+        # Обрабатываем каждый файл
+        files_processed = 0
+        total_chunks = 0
+        errors = []
+        results = []
+        
+        for md_file in md_files:
+            try:
+                # Читаем содержимое файла
+                file_content = md_file.read_text(encoding="utf-8", errors="replace")
+                
+                # Определяем имя документа (относительный путь от docs/)
+                try:
+                    doc_name = md_file.relative_to(docs_folder).as_posix()
+                except ValueError:
+                    # Если не удалось вычислить относительный путь, используем имя файла
+                    doc_name = md_file.name
+                
+                # Обрабатываем файл
+                result = process_readme_file(
+                    file_content=file_content,
+                    doc_name=f"docs/{doc_name}",  # Префикс docs/ для идентификации
+                    model=model,
+                    replace_existing=replace_existing,
+                )
+                
+                if result["success"]:
+                    files_processed += 1
+                    total_chunks += result["chunks_count"]
+                    results.append({
+                        "file": doc_name,
+                        "chunks": result["chunks_count"],
+                        "status": "success",
+                    })
+                else:
+                    error_msg = result.get("error", "Неизвестная ошибка")
+                    errors.append(f"{doc_name}: {error_msg}")
+                    results.append({
+                        "file": doc_name,
+                        "status": "error",
+                        "error": error_msg,
+                    })
+                    
+            except Exception as e:
+                error_msg = f"Ошибка при обработке {md_file.name}: {e}"
+                logger.exception(error_msg)
+                errors.append(error_msg)
+                results.append({
+                    "file": md_file.name,
+                    "status": "error",
+                    "error": str(e),
+                })
+        
+        return {
+            "success": files_processed > 0,
+            "files_processed": files_processed,
+            "total_files": len(md_files),
+            "total_chunks": total_chunks,
+            "errors": errors,
+            "results": results,
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error processing docs folder: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "files_processed": 0,
+            "total_chunks": 0,
+            "errors": [str(e)],
+            "results": [],
         }

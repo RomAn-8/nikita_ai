@@ -20,8 +20,9 @@ from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compres
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
+from .mcp_client import get_git_branch  # MCP-клиент для получения git ветки
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
-from .embeddings import process_readme_file, search_relevant_chunks, has_embeddings, EMBEDDING_MODEL  # Модуль для работы с эмбеддингами
+from .embeddings import process_readme_file, process_docs_folder, search_relevant_chunks, has_embeddings, list_indexed_documents, EMBEDDING_MODEL  # Модуль для работы с эмбеддингами
 
 
 logger = logging.getLogger(__name__)
@@ -759,32 +760,195 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lines = [
-        "Команды:",
-        f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
-        "/mode_json — JSON на каждое сообщение",
-        f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
-        "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)",
-        "/forest_split — посчитать кто кому должен (в конце текст)",
-        "/thinking_model — решать пошагово",
-        "/expert_group_model — решить как группа экспертов",
-        "/tokens_test — тест токенов (режим)",
-        "/tokens_next — следующий этап теста токенов",
-        "/tokens_stop — сводка и выход из теста токенов",
-        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
-        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
-        "/clear_memory — очистить историю памяти",
-        "/clear_embeddings — удалить все эмбеддинги",
-        "/embed_create — создать эмбеддинги из .md файла",
-        "/rag_model — режим RAG (\"Ответь с RAG\" или \"Ответь без RAG\")",
-    ]
+    """
+    Команда /help: показывает список команд или отвечает на вопросы о проекте используя RAG.
+    
+    Использование:
+    - /help - показать список команд
+    - /help <вопрос> - ответить на вопрос о проекте используя RAG
+    """
+    if not update.message:
+        return
+    
+    # Если аргументов нет - показываем список команд
+    if not context.args:
+        lines = [
+            "Команды:",
+            f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
+            "/mode_json — JSON на каждое сообщение",
+            f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
+            "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)",
+            "/forest_split — посчитать кто кому должен (в конце текст)",
+            "/thinking_model — решать пошагово",
+            "/expert_group_model — решить как группа экспертов",
+            "/tokens_test — тест токенов (режим)",
+            "/tokens_next — следующий этап теста токенов",
+            "/tokens_stop — сводка и выход из теста токенов",
+            "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
+            "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
+            "/clear_memory — очистить историю памяти",
+            "/clear_embeddings — удалить все эмбеддинги",
+            "/embed_create — создать эмбеддинги из .md файла",
+            "/embed_docs — создать эмбеддинги из всех файлов в папке docs/",
+            "/rag_model — режим RAG (\"Ответь с RAG\" или \"Ответь без RAG\")",
+            "/help <вопрос> — ответить на вопрос о проекте используя RAG",
+        ]
 
-    if MODEL_GLM:
-        lines.append(f"/model_glm — переключить на {MODEL_GLM}")
-    if MODEL_GEMMA:
-        lines.append(f"/model_gemma — переключить на {MODEL_GEMMA}")
+        if MODEL_GLM:
+            lines.append(f"/model_glm — переключить на {MODEL_GLM}")
+        if MODEL_GEMMA:
+            lines.append(f"/model_gemma — переключить на {MODEL_GEMMA}")
 
-    await safe_reply_text(update, "\n".join(lines))
+        await safe_reply_text(update, "\n".join(lines))
+        return
+    
+    # Если есть аргументы - используем RAG для ответа на вопрос
+    question_text = " ".join(context.args).strip()
+    if not question_text:
+        await safe_reply_text(update, "Пожалуйста, задайте вопрос о проекте. Пример: /help Как работает RAG система?")
+        return
+    
+    await update.message.chat.send_action("typing")
+    
+    chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+    temperature = get_temperature(context, chat_id)
+    memory_enabled = get_memory_enabled(context, chat_id)
+    model = get_model(context, chat_id) or None
+    
+    # Проверяем наличие эмбеддингов
+    if not has_embeddings(EMBEDDING_MODEL):
+        await safe_reply_text(
+            update,
+            "⚠️ Эмбеддинги не найдены в базе данных.\n"
+            "Сначала создайте эмбеддинги с помощью команды /embed_create.\n"
+            "Отправьте README.md и файлы из папки docs/ для индексации документации."
+        )
+        return
+    
+    # Проверяем, является ли вопрос про git ветку
+    question_lower = question_text.lower()
+    is_git_branch_question = any(keyword in question_lower for keyword in [
+        "ветка", "ветку", "ветки", "branch", "git branch", "текущая ветка",
+        "какая ветка", "какую ветку", "какие ветки"
+    ])
+    
+    # Получаем текущую ветку git через MCP (опционально)
+    git_branch_info = None
+    git_branch_name = None
+    try:
+        git_branch_name = await get_git_branch()
+        if git_branch_name:
+            git_branch_info = f"Текущая ветка git: {git_branch_name}"
+    except Exception as e:
+        logger.debug(f"Не удалось получить git ветку через MCP: {e}")
+        # Продолжаем без информации о git
+    
+    # Если вопрос про git ветку и мы получили информацию - отвечаем напрямую
+    if is_git_branch_question and git_branch_name:
+        await safe_reply_text(update, f"🌿 Текущая ветка git: `{git_branch_name}`")
+        return
+    elif is_git_branch_question and not git_branch_name:
+        await safe_reply_text(
+            update,
+            "⚠️ Не удалось получить текущую ветку git.\n"
+            "Убедитесь, что:\n"
+            "- MCP сервер запущен (http://127.0.0.1:8000/mcp)\n"
+            "- Текущая директория MCP сервера является git репозиторием"
+        )
+        return
+    
+    # Ищем релевантные чанки (сначала с порогом)
+    filtered_chunks = []
+    try:
+        relevant_chunks = search_relevant_chunks(
+            question_text,
+            model=EMBEDDING_MODEL,
+            top_k=RAG_TOP_K,
+            min_similarity=RAG_SIM_THRESHOLD,
+            apply_threshold=True
+        )
+        # Фильтруем чанки по порогу
+        filtered_chunks = [chunk for chunk in relevant_chunks if chunk["similarity"] >= RAG_SIM_THRESHOLD]
+        
+        # Если с порогом ничего не найдено, пробуем без порога (для общих вопросов)
+        if not filtered_chunks:
+            logger.debug(f"No chunks found with threshold {RAG_SIM_THRESHOLD}, trying without threshold")
+            relevant_chunks_no_threshold = search_relevant_chunks(
+                question_text,
+                model=EMBEDDING_MODEL,
+                top_k=RAG_TOP_K * 2,  # Берем больше чанков
+                min_similarity=0.0,
+                apply_threshold=False
+            )
+            # Берем топ чанки даже с низкой похожестью (но не нулевой)
+            filtered_chunks = [chunk for chunk in relevant_chunks_no_threshold if chunk["similarity"] > 0.3]
+            
+    except Exception as e:
+        logger.exception(f"Error searching relevant chunks: {e}")
+        await safe_reply_text(update, f"Ошибка при поиске релевантных фрагментов: {e}")
+        return
+    
+    if not filtered_chunks:
+        # Получаем список проиндексированных документов для информативного сообщения
+        indexed_docs = list_indexed_documents(EMBEDDING_MODEL)
+        
+        error_msg = "⚠️ Не нашла релевантных фрагментов в документации для ответа на ваш вопрос."
+        
+        if indexed_docs:
+            error_msg += f"\n\nПроиндексированные документы: {', '.join(indexed_docs[:5])}"
+            if len(indexed_docs) > 5:
+                error_msg += f" и еще {len(indexed_docs) - 5}"
+        else:
+            error_msg += "\n\nДокументация не проиндексирована. Используйте:\n"
+            error_msg += "- `/embed_create` для индексации README.md\n"
+            error_msg += "- `/embed_docs` для индексации папки docs/"
+        
+        error_msg += "\n\nПопробуйте переформулировать вопрос или проиндексировать документацию."
+        
+        await safe_reply_text(update, error_msg)
+        return
+    
+    # Формируем контекст для LLM
+    context_parts = ["Релевантная информация из документации проекта:\n"]
+    for i, chunk in enumerate(filtered_chunks, 1):
+        context_parts.append(f"[Фрагмент {i} (doc_name={chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f})]:")
+        context_parts.append(chunk["text"])
+        context_parts.append("")
+    
+    context_parts.append(f"Вопрос пользователя о проекте: {question_text}")
+    
+    # Добавляем информацию о git ветке, если доступна
+    if git_branch_info:
+        context_parts.append(f"\n{git_branch_info}")
+    
+    context_parts.append("\nОтветь на вопрос пользователя, используя информацию из документации выше.")
+    context_parts.append("Если информация недостаточна, укажи это в ответе.")
+    
+    user_content = "\n".join(context_parts)
+    
+    # Формируем сообщения для LLM
+    system_prompt = SYSTEM_PROMPT_TEXT
+    if memory_enabled:
+        messages = build_messages_with_db_memory(system_prompt, chat_id=chat_id)
+    else:
+        messages = [{"role": "system", "content": system_prompt}]
+    
+    messages.append({"role": "user", "content": user_content})
+    
+    # Отправляем запрос к LLM
+    try:
+        answer = chat_completion(messages, temperature=temperature, model=model)
+        answer = (answer or "").strip() or "Пустой ответ от модели."
+    except Exception as e:
+        await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+        return
+    
+    # Сохраняем в БД
+    mode = "text"  # Используем режим text для сохранения истории
+    db_add_message(chat_id, mode, "user", f"/help {question_text}")
+    db_add_message(chat_id, mode, "assistant", answer)
+    
+    await safe_reply_text(update, answer)
 
 
 async def ch_temperature_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1097,6 +1261,63 @@ async def embed_create_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "✅ Ожидаю .md файл.\n"
         "Пожалуйста, отправьте любой .md файл в чат (как документ)."
     )
+
+
+async def embed_docs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда для создания эмбеддингов из всех .md файлов в папке docs/.
+    Формат: /embed_docs
+    Автоматически находит и индексирует все .md файлы из папки docs/ рекурсивно.
+    """
+    if not update.message:
+        return
+    
+    await update.message.chat.send_action("typing")
+    
+    try:
+        # Обрабатываем папку docs/
+        result = process_docs_folder(replace_existing=True)
+        
+        if not result["success"]:
+            error_msg = result.get("error", "Неизвестная ошибка")
+            await safe_reply_text(
+                update,
+                f"❌ Ошибка при индексации папки docs/: {error_msg}\n"
+                f"Обработано файлов: {result.get('files_processed', 0)}/{result.get('total_files', 0)}"
+            )
+            return
+        
+        # Формируем ответ со статистикой
+        stats = []
+        stats.append(f"✅ Эмбеддинги успешно созданы для папки docs/!")
+        stats.append(f"📁 Обработано файлов: {result['files_processed']}/{result['total_files']}")
+        stats.append(f"📦 Всего чанков: {result['total_chunks']}")
+        stats.append("")
+        
+        # Добавляем информацию о каждом файле
+        if result.get("results"):
+            stats.append("📄 Обработанные файлы:")
+            for file_result in result["results"]:
+                if file_result.get("status") == "success":
+                    stats.append(f"  ✅ {file_result['file']} ({file_result['chunks']} чанков)")
+                else:
+                    stats.append(f"  ❌ {file_result['file']}: {file_result.get('error', 'Ошибка')}")
+        
+        # Добавляем ошибки, если есть
+        if result.get("errors"):
+            stats.append("")
+            stats.append("⚠️ Ошибки:")
+            for error in result["errors"][:5]:  # Показываем первые 5 ошибок
+                stats.append(f"  - {error}")
+            if len(result["errors"]) > 5:
+                stats.append(f"  ... и еще {len(result['errors']) - 5} ошибок")
+        
+        response_text = "\n".join(stats)
+        await safe_reply_text(update, response_text)
+        
+    except Exception as e:
+        logger.exception(f"Error in embed_docs_cmd: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при индексации папки docs/: {e}")
 
 
 async def rag_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2040,6 +2261,7 @@ def run() -> None:
     app.add_handler(CommandHandler("weather_sub_stop", weather_sub_stop_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("embed_create", embed_create_cmd))
+    app.add_handler(CommandHandler("embed_docs", embed_docs_cmd))
     app.add_handler(CommandHandler("rag_model", rag_model_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
