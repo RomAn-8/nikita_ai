@@ -260,3 +260,458 @@ async def get_pr_info(owner: str, repo: str, pr_number: int, github_token: str) 
             raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}. Убедитесь, что сервер запущен.")
         logger.exception(f"Exception getting PR info: {e}")
         raise ValueError(f"Ошибка при получении информации о PR через MCP: {e}")
+
+
+# ==================== Google Sheets MCP Client Functions ====================
+
+async def user_get(username: str) -> dict[str, Any] | None:
+    """
+    Получить данные пользователя по username.
+    
+    Args:
+        username: Username пользователя из Telegram
+        
+    Returns:
+        Словарь с данными пользователя или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "user_get",
+                    arguments={"username": username},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error getting user: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse user data JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception getting user: {e}")
+        raise ValueError(f"Ошибка при получении данных пользователя: {e}")
+
+
+async def user_register(username: str, fio: str, phone: str) -> dict[str, Any] | None:
+    """
+    Зарегистрировать или обновить данные пользователя.
+    
+    Args:
+        username: Username из Telegram
+        fio: ФИО пользователя
+        phone: Телефон пользователя
+        
+    Returns:
+        Словарь со статусом операции или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "user_register",
+                    arguments={
+                        "username": username,
+                        "fio": fio,
+                        "phone": phone,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error registering user: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse registration response JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception registering user: {e}")
+        raise ValueError(f"Ошибка при регистрации пользователя: {e}")
+
+
+async def user_block(username: str) -> bool:
+    """
+    Заблокировать пользователя.
+    
+    Args:
+        username: Username пользователя из Telegram
+        
+    Returns:
+        True если успешно, иначе выбрасывает ValueError
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "user_block",
+                    arguments={"username": username},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return False
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error blocking user: {response_text}")
+            raise ValueError(response_text)
+        
+        return True
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception blocking user: {e}")
+        raise ValueError(f"Ошибка при блокировке пользователя: {e}")
+
+
+async def user_unblock(username: str) -> bool:
+    """
+    Разблокировать пользователя.
+    
+    Args:
+        username: Username пользователя из Telegram
+        
+    Returns:
+        True если успешно, иначе выбрасывает ValueError
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "user_unblock",
+                    arguments={"username": username},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return False
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error unblocking user: {response_text}")
+            raise ValueError(response_text)
+        
+        return True
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception unblocking user: {e}")
+        raise ValueError(f"Ошибка при разблокировке пользователя: {e}")
+
+
+async def user_delete(username: str) -> bool:
+    """
+    Удалить регистрацию пользователя из Google Sheets.
+    
+    Args:
+        username: Username пользователя из Telegram
+        
+    Returns:
+        True если успешно, иначе False
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "user_delete",
+                    arguments={"username": username},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return False
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error deleting user: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            response_data = json.loads(response_text)
+            return response_data.get("status") == "deleted"
+        except json.JSONDecodeError:
+            # Если не JSON, проверяем текстовый ответ
+            return "удален" in response_text.lower() or "deleted" in response_text.lower()
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception deleting user: {e}")
+        raise ValueError(f"Ошибка при удалении пользователя: {e}")
+
+
+async def reg_create(username: str, date: str, time: str, note: str = "") -> dict[str, Any] | None:
+    """
+    Создать запись на тренировку.
+    
+    Args:
+        username: Username пользователя из Telegram
+        date: Дата в формате DD-MM-YYYY
+        time: Время в формате HH:MM
+        note: Примечание к записи (опционально)
+        
+    Returns:
+        Словарь с данными созданной записи или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                arguments = {
+                    "username": username,
+                    "date": date,
+                    "time": time,
+                }
+                if note:
+                    arguments["note"] = note
+                
+                result = await session.call_tool(
+                    "reg_create",
+                    arguments=arguments,
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error creating registration: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse registration creation response JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception creating registration: {e}")
+        raise ValueError(f"Ошибка при создании записи: {e}")
+
+
+async def reg_find_by_user(username: str) -> list[dict[str, Any]] | None:
+    """
+    Найти все активные записи пользователя.
+    
+    Args:
+        username: Username пользователя из Telegram
+        
+    Returns:
+        Список словарей с данными записей или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "reg_find_by_user",
+                    arguments={"username": username},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return []
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error finding registrations: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse registrations JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception finding registrations: {e}")
+        raise ValueError(f"Ошибка при поиске записей: {e}")
+
+
+async def reg_reschedule(reg_id: int, new_date: str, new_time: str) -> dict[str, Any] | None:
+    """
+    Перенести запись на другое время.
+    
+    Args:
+        reg_id: ID записи
+        new_date: Новая дата в формате DD-MM-YYYY
+        new_time: Новое время в формате HH:MM
+        
+    Returns:
+        Словарь с обновленными данными записи или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "reg_reschedule",
+                    arguments={
+                        "reg_id": reg_id,
+                        "new_date": new_date,
+                        "new_time": new_time,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error rescheduling registration: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse reschedule response JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception rescheduling registration: {e}")
+        raise ValueError(f"Ошибка при переносе записи: {e}")
+
+
+async def reg_cancel(reg_id: int) -> bool:
+    """
+    Отменить запись.
+    
+    Args:
+        reg_id: ID записи
+        
+    Returns:
+        True если успешно, иначе выбрасывает ValueError
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "reg_cancel",
+                    arguments={"reg_id": reg_id},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return False
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error canceling registration: {response_text}")
+            raise ValueError(response_text)
+        
+        return True
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception canceling registration: {e}")
+        raise ValueError(f"Ошибка при отмене записи: {e}")

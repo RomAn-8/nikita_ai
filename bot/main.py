@@ -22,7 +22,11 @@ from .summarizer import MODE_SUMMARY, build_messages_with_summary, maybe_compres
 from .mcp_weather import get_weather_via_mcp  # MCP-клиент для получения погоды
 from .mcp_news import get_news_via_mcp  # MCP-клиент для получения новостей
 from .mcp_docker import site_up_via_mcp, site_screenshot_via_mcp, site_down_via_mcp  # MCP-клиент для управления Docker
-from .mcp_client import get_git_branch, get_pr_diff, get_pr_files, get_pr_info  # MCP-клиент для получения git ветки и PR данных
+from .mcp_client import (
+    get_git_branch, get_pr_diff, get_pr_files, get_pr_info,  # MCP-клиент для получения git ветки и PR данных
+    user_get, user_register, user_block, user_unblock, user_delete,  # MCP-клиент для работы с пользователями
+    reg_create, reg_find_by_user, reg_reschedule, reg_cancel,  # MCP-клиент для работы с записями
+)
 
 # Импортируем функции для анализа PR из скрипта
 import sys
@@ -747,31 +751,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_model = get_effective_model(context, chat_id)
 
     lines = [
-        "Привет!",
+        "Привет! 👋",
         "",
-        "Команды:",
+        "📋 Доступные команды:",
+        "",
+        "🔧 Основные режимы:",
         f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
         "/mode_json — JSON на каждое сообщение",
         f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
-        "/tz_creation_site — требования для ТЗ (вопросы текстом, итог JSON)",
-        "/forest_split — кто кому должен (вопросы текстом, итог текстом)",
-        "/thinking_model — решай пошагово",
-        "/expert_group_model — группа экспертов",
-        "/tokens_test — тест токенов (режим: короткий/длинный/перелимит)",
-        "/tokens_next — следующий этап теста токенов",
-        "/tokens_stop — сводка и выход из теста токенов",
-        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
-        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
-        "/clear_memory — очистить память чата",
-        "/clear_embeddings — удалить все эмбеддинги",
-        "/embed_create — создать эмбеддинги из .md файла (отправьте файл после команды)",
-        "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
+        "/summary_debug — показать текущее summary (режим summary)",
     ]
-
+    
     if MODEL_GLM:
         lines.append(f"/model_glm — модель {_short_model_name(MODEL_GLM)}")
     if MODEL_GEMMA:
         lines.append(f"/model_gemma — модель {_short_model_name(MODEL_GEMMA)}")
+    
+    lines.extend([
+        "",
+        "🤖 Специальные режимы:",
+        "/tz_creation_site — собрать ТЗ на сайт (итог JSON)",
+        "/forest_split — кто кому должен (итог текст)",
+        "/thinking_model — решать пошагово",
+        "/expert_group_model — группа экспертов",
+        "",
+        "⚙️ Настройки:",
+        "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
+        "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
+        "/clear_memory — очистить память чата",
+        "/clear_embeddings — удалить все эмбеддинги",
+        "",
+        "🧪 Тестирование:",
+        "/tokens_test — тест токенов (включить режим)",
+        "/tokens_next — тест токенов: следующий этап",
+        "/tokens_stop — тест токенов: сводка и выход",
+        "",
+        "📚 RAG и эмбеддинги:",
+        "/embed_create — создать эмбеддинги из .md файла (сначала отправьте файл)",
+        "/embed_docs — создать эмбеддинги из всех файлов в папке docs/",
+        "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
+        "",
+        "🌤️ Погода:",
+        "/weather_sub — подписка на погоду (пример: /weather_sub Москва 30)",
+        "/weather_sub_stop — остановить подписку (пример: /weather_sub_stop Москва)",
+        "/digest — утренняя сводка: погода + новости (пример: /digest Москва, технологии)",
+        "",
+        "👤 Регистрация и записи:",
+        "/register — регистрация (пример: /register Иванов Иван Иванович +79991234567)",
+        "/unregister — удалить свою регистрацию",
+        "/train_signup — запись на тренировку (пример: /train_signup 15-02-2026 18:00 [примечание])",
+        "/train_move — перенос записи (пример: /train_move 1 16-02-2026 19:00)",
+        "/train_cancel — отмена записи (пример: /train_cancel 1)",
+        "/support — поддержка с RAG (пример: /support можно перенести запись?)",
+    ])
+    
+    if PR_REVIEW_AVAILABLE:
+        lines.append("/review_pr — анализ Pull Request (пример: /review_pr 123)")
+    
+    lines.extend([
+        "",
+        "📖 Справка:",
+        "/help — показать список команд или ответить на вопрос о проекте",
+    ])
 
     lines.extend([
         "",
@@ -798,31 +839,60 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Если аргументов нет - показываем список команд
     if not context.args:
         lines = [
-            "Команды:",
+            "📋 Доступные команды:",
+            "",
+            "🔧 Основные режимы:",
             f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
             "/mode_json — JSON на каждое сообщение",
             f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
-            "/tz_creation_site — собрать ТЗ на сайт (в конце JSON)",
-            "/forest_split — посчитать кто кому должен (в конце текст)",
+            "/summary_debug — показать текущее summary (режим summary)",
+            "",
+            "🤖 Специальные режимы:",
+            "/tz_creation_site — собрать ТЗ на сайт (итог JSON)",
+            "/forest_split — кто кому должен (итог текст)",
             "/thinking_model — решать пошагово",
-            "/expert_group_model — решить как группа экспертов",
-            "/tokens_test — тест токенов (режим)",
-            "/tokens_next — следующий этап теста токенов",
-            "/tokens_stop — сводка и выход из теста токенов",
-            "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 1.2)",
-            "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory on)",
-            "/clear_memory — очистить историю памяти",
+            "/expert_group_model — группа экспертов",
+            "",
+            "⚙️ Настройки:",
+            "/ch_temperature — показать/изменить температуру (пример: /ch_temperature 0.7)",
+            "/ch_memory — память ВКЛ/ВЫКЛ (пример: /ch_memory off)",
+            "/clear_memory — очистить память чата",
             "/clear_embeddings — удалить все эмбеддинги",
-            "/embed_create — создать эмбеддинги из .md файла",
+            "",
+            "🧪 Тестирование:",
+            "/tokens_test — тест токенов (включить режим)",
+            "/tokens_next — тест токенов: следующий этап",
+            "/tokens_stop — тест токенов: сводка и выход",
+            "",
+            "📚 RAG и эмбеддинги:",
+            "/embed_create — создать эмбеддинги из .md файла (сначала отправьте файл)",
             "/embed_docs — создать эмбеддинги из всех файлов в папке docs/",
-            "/rag_model — режим RAG (\"Ответь с RAG\" или \"Ответь без RAG\")",
+            "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
+            "",
+            "🌤️ Погода:",
+            "/weather_sub — подписка на погоду (пример: /weather_sub Москва 30)",
+            "/weather_sub_stop — остановить подписку (пример: /weather_sub_stop Москва)",
+            "/digest — утренняя сводка: погода + новости (пример: /digest Москва, технологии)",
+            "",
+            "👤 Регистрация и записи:",
+            "/register — регистрация (пример: /register Иванов Иван Иванович +79991234567)",
+            "/unregister — удалить свою регистрацию",
+            "/train_signup — запись на тренировку (пример: /train_signup 15-02-2026 18:00 [примечание])",
+            "/train_move — перенос записи (пример: /train_move 1 16-02-2026 19:00)",
+            "/train_cancel — отмена записи (пример: /train_cancel 1)",
+            "/support — поддержка с RAG (пример: /support можно перенести запись?)",
+            "",
+            "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
         ]
 
+        if PR_REVIEW_AVAILABLE:
+            lines.insert(-2, "/review_pr — анализ Pull Request (пример: /review_pr 123)")
+
         if MODEL_GLM:
-            lines.append(f"/model_glm — переключить на {MODEL_GLM}")
+            lines.insert(4, f"/model_glm — модель {_short_model_name(MODEL_GLM)}")
         if MODEL_GEMMA:
-            lines.append(f"/model_gemma — переключить на {MODEL_GEMMA}")
+            lines.insert(5 if MODEL_GLM else 4, f"/model_gemma — модель {_short_model_name(MODEL_GEMMA)}")
 
         await safe_reply_text(update, "\n".join(lines))
         return
@@ -2301,6 +2371,341 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_reply_text(update, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+# -------------------- GOOGLE SHEETS COMMANDS --------------------
+
+async def register_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /register <ФИО> <телефон>"""
+    if not update.message:
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await safe_reply_text(update, "Использование: /register <ФИО> <телефон>\nПример: /register Иванов Иван Иванович +79991234567")
+        return
+    
+    username = update.effective_user.username
+    if not username:
+        await safe_reply_text(update, "❌ Ошибка: у вас не установлен username в Telegram. Пожалуйста, установите username в настройках Telegram и попробуйте снова.")
+        return
+    
+    fio = context.args[0]
+    phone = context.args[1]
+    
+    # Если ФИО состоит из нескольких слов, объединяем их
+    if len(context.args) > 2:
+        fio = " ".join(context.args[:-1])
+        phone = context.args[-1]
+    
+    try:
+        result = await user_register(username, fio, phone)
+        if result and result.get("status") == "registered":
+            await safe_reply_text(update, "✅ Вы зарегистрированы")
+        elif result and result.get("status") == "updated":
+            await safe_reply_text(update, "✅ Данные обновлены")
+        else:
+            await safe_reply_text(update, "❌ Ошибка при регистрации")
+    except ValueError as e:
+        await safe_reply_text(update, f"❌ {e}")
+    except Exception as e:
+        logger.exception(f"Error in register_cmd: {e}")
+        await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+
+
+async def unregister_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /unregister - удалить свою регистрацию"""
+    if not update.message:
+        return
+    
+    username = update.effective_user.username
+    if not username:
+        await safe_reply_text(update, "❌ Ошибка: у вас не установлен username в Telegram. Пожалуйста, установите username в настройках Telegram.")
+        return
+    
+    try:
+        # Проверяем, есть ли активные записи
+        active_regs = []
+        try:
+            active_regs = await reg_find_by_user(username) or []
+        except ValueError:
+            pass
+        
+        if active_regs:
+            await safe_reply_text(
+                update,
+                f"⚠️ У вас есть {len(active_regs)} активных записей. Сначала отмените их командой /train_cancel <reg_id>"
+            )
+            return
+        
+        # Удаляем регистрацию
+        result = await user_delete(username)
+        if result:
+            await safe_reply_text(update, "✅ Ваша регистрация удалена")
+        else:
+            await safe_reply_text(update, "❌ Ошибка при удалении регистрации")
+    except ValueError as e:
+        await safe_reply_text(update, f"❌ {e}")
+    except Exception as e:
+        logger.exception(f"Error in unregister_cmd: {e}")
+        await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+
+
+async def train_signup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /train_signup <дата DD-MM-YYYY> <время HH:MM> [примечание]"""
+    if not update.message:
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await safe_reply_text(update, "Использование: /train_signup <дата DD-MM-YYYY> <время HH:MM> [примечание]\nПример: /train_signup 15-02-2026 18:00\nПример с примечанием: /train_signup 15-02-2026 10:00 Уличная тренировка кроссфит гиря 16 кг")
+        return
+    
+    username = update.effective_user.username
+    if not username:
+        await safe_reply_text(update, "❌ Ошибка: у вас не установлен username в Telegram. Пожалуйста, установите username в настройках Telegram.")
+        return
+    
+    date = context.args[0]
+    time = context.args[1]
+    # Все остальные аргументы после времени - это примечание
+    note = " ".join(context.args[2:]) if len(context.args) > 2 else ""
+    
+    try:
+        result = await reg_create(username, date, time, note)
+        if result:
+            reg_id = result.get("reg_id")
+            row_url = result.get("row_url", "")
+            response_text = f"✅ Вы записаны на {date} в {time}\nID записи: {reg_id}"
+            if note:
+                response_text += f"\nПримечание: {note}"
+            response_text += f"\nСсылка: {row_url}"
+            await safe_reply_text(update, response_text)
+        else:
+            await safe_reply_text(update, "❌ Ошибка при создании записи")
+    except ValueError as e:
+        await safe_reply_text(update, f"❌ {e}")
+    except Exception as e:
+        logger.exception(f"Error in train_signup_cmd: {e}")
+        await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+
+
+async def train_move_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /train_move <reg_id> <дата DD-MM-YYYY> <время HH:MM>"""
+    if not update.message:
+        return
+    
+    if not context.args or len(context.args) < 3:
+        await safe_reply_text(update, "Использование: /train_move <reg_id> <дата DD-MM-YYYY> <время HH:MM>\nПример: /train_move 1 16-02-2026 19:00")
+        return
+    
+    try:
+        reg_id = int(context.args[0])
+        new_date = context.args[1]
+        new_time = context.args[2]
+        
+        result = await reg_reschedule(reg_id, new_date, new_time)
+        if result:
+            row_url = result.get("row_url", "")
+            await safe_reply_text(
+                update,
+                f"✅ Запись {reg_id} перенесена на {new_date} {new_time}\nСсылка: {row_url}"
+            )
+        else:
+            await safe_reply_text(update, "❌ Ошибка при переносе записи")
+    except ValueError as e:
+        await safe_reply_text(update, f"❌ {e}")
+    except Exception as e:
+        logger.exception(f"Error in train_move_cmd: {e}")
+        await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+
+
+async def train_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /train_cancel <reg_id>"""
+    if not update.message:
+        return
+    
+    if not context.args or len(context.args) < 1:
+        await safe_reply_text(update, "Использование: /train_cancel <reg_id>\nПример: /train_cancel 1")
+        return
+    
+    try:
+        reg_id = int(context.args[0])
+        result = await reg_cancel(reg_id)
+        if result:
+            await safe_reply_text(update, f"✅ Запись {reg_id} отменена и удалена из системы")
+        else:
+            await safe_reply_text(update, "❌ Ошибка при отмене записи")
+    except ValueError as e:
+        await safe_reply_text(update, f"❌ {e}")
+    except Exception as e:
+        logger.exception(f"Error in train_cancel_cmd: {e}")
+        await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+
+
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /support <вопрос> - поддержка с RAG + MCP"""
+    if not update.message:
+        return
+    
+    if not context.args:
+        await safe_reply_text(update, "Использование: /support <вопрос>\nПример: /support можно перенести запись?")
+        return
+    
+    question = " ".join(context.args)
+    username = update.effective_user.username
+    if not username:
+        await safe_reply_text(update, "❌ Ошибка: у вас не установлен username в Telegram. Пожалуйста, установите username в настройках Telegram.")
+        return
+    
+    try:
+        # Получаем данные пользователя через MCP
+        user_data = None
+        try:
+            user_data = await user_get(username)
+        except ValueError as e:
+            logger.warning(f"Could not get user data: {e}")
+        
+        # Получаем активные записи через MCP
+        active_regs = []
+        try:
+            active_regs = await reg_find_by_user(username) or []
+            if active_regs:
+                logger.info(f"Found {len(active_regs)} active registrations for user {username}: {active_regs}")
+            else:
+                logger.info(f"No active registrations found for user {username}")
+        except ValueError as e:
+            logger.warning(f"Could not get user registrations: {e}")
+        
+        # RAG поиск
+        rag_chunks = []
+        if has_embeddings(EMBEDDING_MODEL):
+            try:
+                rag_chunks = search_relevant_chunks(
+                    question,
+                    model=EMBEDDING_MODEL,
+                    top_k=RAG_TOP_K,
+                    min_similarity=RAG_SIM_THRESHOLD,
+                    apply_threshold=True
+                )
+            except Exception as e:
+                logger.exception(f"Error in RAG search: {e}")
+        
+        # Формируем контекст для LLM
+        context_parts = []
+        
+        # Данные пользователя
+        if user_data:
+            context_parts.append("Контекст пользователя:")
+            context_parts.append(f"- ФИО: {user_data.get('fio', 'не указано')}")
+            context_parts.append(f"- Статус: {user_data.get('status', 'неизвестно')}")
+            context_parts.append(f"- Дата регистрации: {user_data.get('date_reg', 'не указано')}")
+            context_parts.append("")
+        
+        # Активные записи
+        if active_regs:
+            context_parts.append("Активные записи:")
+            for reg in active_regs:
+                context_parts.append(f"- Запись #{reg.get('reg_id')}: {reg.get('date')} {reg.get('time')}, статус: {reg.get('status')}")
+            context_parts.append("")
+        
+        # RAG контекст
+        if rag_chunks:
+            context_parts.append("Релевантная документация:")
+            for i, chunk in enumerate(rag_chunks, 1):
+                context_parts.append(f"[Фрагмент {i} (doc_name={chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f})]:")
+                context_parts.append(chunk["text"])
+                context_parts.append("")
+        
+        context_parts.append(f"Вопрос пользователя: {question}")
+        context_parts.append("")
+        context_parts.append("ВАЖНО: Ответь на вопрос пользователя, используя:")
+        context_parts.append("1. Команды из документации (если вопрос о действиях - укажи конкретную команду)")
+        context_parts.append("2. Данные пользователя из контекста выше (его активные записи, если есть)")
+        context_parts.append("3. Информацию из релевантной документации")
+        context_parts.append("")
+        context_parts.append("В конце ответа НЕ указывай:")
+        context_parts.append("- Данные регистрации (они будут добавлены автоматически)")
+        context_parts.append("- Источники документации (они будут добавлены автоматически)")
+        context_parts.append("Просто ответь на вопрос, используя информацию из контекста выше.")
+        
+        user_content = "\n".join(context_parts)
+        
+        # Формируем сообщения для LLM
+        system_prompt = """Ты помощник поддержки для системы записи на тренировки. 
+
+ВАЖНЫЕ ПРАВИЛА:
+1. ВСЕГДА используй команды из документации для ответа на вопросы пользователей
+2. Если в документации есть команда (например, /train_move, /train_cancel, /train_signup), ОБЯЗАТЕЛЬНО укажи её в ответе
+3. НЕ говори "обратитесь к администратору", если в документации есть способ решить вопрос через команды бота
+4. Используй конкретные данные из контекста пользователя (его записи, reg_id, даты, время)
+5. Будь конкретным и давай практические инструкции
+
+Отвечай на вопросы пользователей, используя предоставленный контекст и команды из документации."""
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": user_content})
+        
+        # Отправляем запрос к LLM
+        try:
+            answer = chat_completion(messages, temperature=0.7, model=OPENROUTER_MODEL)
+            answer = (answer or "").strip() or "Пустой ответ от модели."
+        except Exception as e:
+            await safe_reply_text(update, f"Ошибка запроса к LLM: {e}")
+            return
+        
+        # Формируем финальный ответ с источниками и данными регистрации
+        response_parts = [answer]
+        
+        # Добавляем источники (компактный формат)
+        if rag_chunks:
+            response_parts.append("")
+            response_parts.append("📚 Источники:")
+            for chunk in rag_chunks:
+                # Берем компактную цитату (до 120 символов, первое предложение)
+                chunk_text = chunk["text"]
+                # Убираем переносы строк и лишние пробелы
+                chunk_text = " ".join(chunk_text.split())
+                # Берем первое предложение или первые 120 символов
+                sentences = chunk_text.split(". ")
+                if sentences:
+                    quote = sentences[0]
+                    if len(quote) > 120:
+                        quote = quote[:120] + "..."
+                    elif len(sentences) > 1 and len(quote) < 80:
+                        # Если первое предложение короткое, добавляем второе
+                        quote = ". ".join(sentences[:2])
+                        if len(quote) > 120:
+                            quote = quote[:120] + "..."
+                    if not quote.endswith(".") and not quote.endswith("..."):
+                        quote += "."
+                else:
+                    quote = chunk_text[:120] + "..." if len(chunk_text) > 120 else chunk_text
+                
+                # Компактный формат: (doc_name, chunk_index, score, цитата)
+                response_parts.append(f"({chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f}, цитата=\"{quote}\")")
+        
+        # Добавляем данные регистрации
+        if active_regs:
+            response_parts.append("")
+            response_parts.append("📅 Данные регистрации:")
+            for reg in active_regs:
+                reg_id = reg.get('reg_id') or 'не указан'
+                date = reg.get('date') or 'не указана'
+                time = reg.get('time') or 'не указано'
+                status = reg.get('status') or 'не указан'
+                response_parts.append(f"- Запись #{reg_id}: {date} {time}, статус: {status}")
+        elif user_data:
+            # Если есть пользователь, но нет записей
+            response_parts.append("")
+            response_parts.append("📅 Данные регистрации:")
+            response_parts.append("- У вас пока нет активных записей. Используйте /train_signup для записи на тренировку.")
+        
+        final_response = "\n".join(response_parts)
+        
+        # Отправляем ответ (разбиваем на части, если слишком длинный)
+        await safe_reply_text(update, final_response)
+        
+    except Exception as e:
+        logger.exception(f"Error in support_cmd: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при обработке запроса поддержки: {e}")
+
+
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2334,7 +2739,14 @@ async def post_init(app: Application) -> None:
         BotCommand("weather_sub_stop", "Остановить подписку на погоду (пример: /weather_sub_stop Москва)"),
         BotCommand("digest", "Утренняя сводка: погода + новости (пример: /digest Москва, технологии)"),
         BotCommand("embed_create", "Создать эмбеддинги из .md файла (сначала отправьте файл)"),
+        BotCommand("embed_docs", "Создать эмбеддинги из всех файлов в папке docs/"),
         BotCommand("rag_model", "Режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")"),
+        BotCommand("register", "Регистрация (пример: /register Иванов Иван Иванович +79991234567)"),
+        BotCommand("unregister", "Удалить свою регистрацию"),
+        BotCommand("train_signup", "Запись на тренировку (пример: /train_signup 15-02-2026 18:00 [примечание])"),
+        BotCommand("train_move", "Перенос записи (пример: /train_move 1 16-02-2026 19:00)"),
+        BotCommand("train_cancel", "Отмена записи (пример: /train_cancel 1)"),
+        BotCommand("support", "Поддержка с RAG (пример: /support можно перенести запись?)"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -2416,6 +2828,12 @@ def run() -> None:
     app.add_handler(CommandHandler("embed_create", embed_create_cmd))
     app.add_handler(CommandHandler("embed_docs", embed_docs_cmd))
     app.add_handler(CommandHandler("rag_model", rag_model_cmd))
+    app.add_handler(CommandHandler("register", register_cmd))
+    app.add_handler(CommandHandler("unregister", unregister_cmd))
+    app.add_handler(CommandHandler("train_signup", train_signup_cmd))
+    app.add_handler(CommandHandler("train_move", train_move_cmd))
+    app.add_handler(CommandHandler("train_cancel", train_cancel_cmd))
+    app.add_handler(CommandHandler("support", support_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
