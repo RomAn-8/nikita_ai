@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import logging
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .mcp_client import (
     get_git_branch, get_pr_diff, get_pr_files, get_pr_info,  # MCP-клиент для получения git ветки и PR данных
     user_get, user_register, user_block, user_unblock, user_delete,  # MCP-клиент для работы с пользователями
     reg_create, reg_find_by_user, reg_reschedule, reg_cancel,  # MCP-клиент для работы с записями
+    task_create, task_list, task_delete,  # MCP-клиент для работы с задачами
 )
 
 # Импортируем функции для анализа PR из скрипта
@@ -789,7 +791,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📚 RAG и эмбеддинги:",
         "/embed_create — создать эмбеддинги из .md файла (сначала отправьте файл)",
         "/embed_docs — создать эмбеддинги из всех файлов в папке docs/",
-        "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
+        "/rag_model — режим RAG",
+        "",
+        "💬 Словесные команды (в режиме RAG):",
+        "• \"RAG+фильтр\" или \"RAG+фильтр <вопрос>\" — поиск с порогом похожести",
+        "• \"RAG без фильтра\" или \"RAG без фильтра <вопрос>\" — поиск без порога",
+        "• \"Без RAG\" или \"Без RAG <вопрос>\" — обычный ответ без поиска",
         "",
         "🌤️ Погода:",
         "/weather_sub — подписка на погоду (пример: /weather_sub Москва 30)",
@@ -803,6 +810,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/train_move — перенос записи (пример: /train_move 1 16-02-2026 19:00)",
         "/train_cancel — отмена записи (пример: /train_cancel 1)",
         "/support — поддержка с RAG (пример: /support можно перенести запись?)",
+        "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
+        "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
     ])
     
     if PR_REVIEW_AVAILABLE:
@@ -867,7 +876,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "📚 RAG и эмбеддинги:",
             "/embed_create — создать эмбеддинги из .md файла (сначала отправьте файл)",
             "/embed_docs — создать эмбеддинги из всех файлов в папке docs/",
-            "/rag_model — режим RAG (используйте \"Ответь с RAG\" или \"Ответь без RAG\")",
+            "/rag_model — режим RAG",
+            "",
+            "💬 Словесные команды (в режиме RAG):",
+            "• \"RAG+фильтр\" или \"RAG+фильтр <вопрос>\" — поиск с порогом похожести",
+            "• \"RAG без фильтра\" или \"RAG без фильтра <вопрос>\" — поиск без порога",
+            "• \"Без RAG\" или \"Без RAG <вопрос>\" — обычный ответ без поиска",
             "",
             "🌤️ Погода:",
             "/weather_sub — подписка на погоду (пример: /weather_sub Москва 30)",
@@ -881,6 +895,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/train_move — перенос записи (пример: /train_move 1 16-02-2026 19:00)",
             "/train_cancel — отмена записи (пример: /train_cancel 1)",
             "/support — поддержка с RAG (пример: /support можно перенести запись?)",
+            "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -1945,6 +1960,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_forest_message(update, context, text, temperature=temperature, model=model)
         return
 
+    # ---- TASK LIST MODE ----
+    if mode == "task_list":
+        await handle_task_list_message(update, context, text, temperature=temperature, model=model)
+        return
+
     # ---- RAG MODE ----
     if mode == "rag":
         # Получаем текущий подрежим или устанавливаем по умолчанию
@@ -2620,6 +2640,10 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context_parts.append("2. Данные пользователя из контекста выше (его активные записи, если есть)")
         context_parts.append("3. Информацию из релевантной документации")
         context_parts.append("")
+        context_parts.append("ОСОБОЕ ВНИМАНИЕ:")
+        context_parts.append("- Если вопрос о времени тренировки или когда нужно прийти, ВСЕГДА указывай, что нужно приходить за 15 минут до начала тренировки.")
+        context_parts.append("  Например: если тренировка в 10:00, нужно прийти к 09:45.")
+        context_parts.append("")
         context_parts.append("В конце ответа НЕ указывай:")
         context_parts.append("- Данные регистрации (они будут добавлены автоматически)")
         context_parts.append("- Источники документации (они будут добавлены автоматически)")
@@ -2636,6 +2660,7 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 3. НЕ говори "обратитесь к администратору", если в документации есть способ решить вопрос через команды бота
 4. Используй конкретные данные из контекста пользователя (его записи, reg_id, даты, время)
 5. Будь конкретным и давай практические инструкции
+6. ВАЖНО: Если пользователь спрашивает о времени тренировки или когда нужно прийти, ВСЕГДА указывай, что нужно приходить за 15 минут до начала тренировки. Например, если тренировка в 10:00, нужно прийти к 09:45.
 
 Отвечай на вопросы пользователей, используя предоставленный контекст и команды из документации."""
         messages = [{"role": "system", "content": system_prompt}]
@@ -2706,6 +2731,404 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_reply_text(update, f"❌ Ошибка при обработке запроса поддержки: {e}")
 
 
+async def task_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /task_list - переключение в режим работы с задачами"""
+    if not update.message:
+        return
+    
+    context.user_data["mode"] = "task_list"
+    reset_tz(context)
+    reset_forest(context)
+    
+    welcome_text = """✅ Режим работы с задачами активирован!
+
+Теперь вы можете отправлять словесные команды для работы с задачами:
+
+📝 Примеры команд:
+• "Создай задачу на 15-02-2026 в 10:00 с приоритетом high: Подготовить презентацию"
+• "Покажи задачи с приоритетом high"
+• "Покажи невыполненные задачи"
+• "Удали задачу в строке 5"
+• "Покажи задачи с приоритетом high и предложи, что делать первым"
+
+Для выхода из режима используйте команду /cancel или переключитесь на другой режим."""
+    
+    await safe_reply_text(update, welcome_text)
+
+
+async def handle_task_list_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, temperature: float, model: str) -> None:
+    """Обработчик сообщений в режиме task_list"""
+    if not update.message:
+        return
+    
+    # Проверка на выход из режима
+    text_lower = text.lower().strip()
+    if text_lower in ["выход", "отмена", "cancel", "/cancel"]:
+        context.user_data["mode"] = "text"
+        await safe_reply_text(update, "✅ Режим работы с задачами отключен. Возврат в обычный режим.")
+        return
+    
+    # Fallback: попытка распознать простые команды без LLM
+    # Удаление задачи: "удали задачу в строке X" или "удали строку X"
+    delete_match = re.search(r'(?:удали|удалить|delete).*?(?:задачу|строку|task).*?(?:в|на|номер|#)?\s*(\d+)', text_lower)
+    if delete_match:
+        try:
+            row_num = int(delete_match.group(1))
+            result = await task_delete(row_num)
+            if result:
+                status = result.get("status", "deleted")
+                if status == "cleared":
+                    await safe_reply_text(update, f"✅ Задача в строке {row_num} очищена (последняя строка данных)")
+                else:
+                    await safe_reply_text(update, f"✅ Задача в строке {row_num} удалена")
+            else:
+                await safe_reply_text(update, f"❌ Не удалось удалить задачу в строке {row_num}")
+            return
+        except Exception as e:
+            logger.exception(f"Error in fallback delete: {e}")
+            # Продолжаем к обычной обработке через LLM
+    
+    # Просмотр всех задач: "покажи задачи", "список задач", "задачи"
+    if text_lower in ["покажи задачи", "список задач", "задачи", "показать задачи", "list tasks", "show tasks"]:
+        try:
+            tasks = await task_list() or []
+            if not tasks:
+                await safe_reply_text(update, "📋 Задач не найдено")
+                return
+            
+            response_parts = ["📋 Список задач:\n"]
+            for task in tasks:
+                status = "✅" if task.get("completed") else "⏳"
+                priority_emoji = {"high": "🔴", "middle": "🟡", "low": "🟢"}.get(task.get("priority", "").lower(), "")
+                response_parts.append(f"{status} Строка {task.get('row_number')}: {task.get('date')} {task.get('time')} | {priority_emoji} {task.get('priority', '').upper()} | {task.get('task', '')}")
+            
+            await safe_reply_text(update, "\n".join(response_parts))
+            return
+        except Exception as e:
+            logger.exception(f"Error in fallback list: {e}")
+            # Продолжаем к обычной обработке через LLM
+    
+    try:
+        # RAG поиск
+        rag_chunks = []
+        if has_embeddings(EMBEDDING_MODEL):
+            try:
+                rag_chunks = search_relevant_chunks(
+                    text,
+                    model=EMBEDDING_MODEL,
+                    top_k=RAG_TOP_K,
+                    min_similarity=RAG_SIM_THRESHOLD,
+                    apply_threshold=True
+                )
+            except Exception as e:
+                logger.exception(f"Error in RAG search: {e}")
+        
+        # Получаем список всех задач для контекста
+        all_tasks = []
+        try:
+            all_tasks = await task_list() or []
+        except Exception as e:
+            logger.warning(f"Could not get tasks: {e}")
+        
+        # Формируем контекст для LLM
+        context_parts = []
+        
+        # RAG контекст
+        if rag_chunks:
+            context_parts.append("Релевантная документация:")
+            for i, chunk in enumerate(rag_chunks, 1):
+                context_parts.append(f"[Фрагмент {i} (doc_name={chunk['doc_name']}, chunk_index={chunk['chunk_index']}, score={chunk['similarity']:.4f})]:")
+                context_parts.append(chunk["text"])
+                context_parts.append("")
+        
+        # Текущие задачи
+        if all_tasks:
+            context_parts.append("Текущие задачи в системе:")
+            for task in all_tasks:
+                status = "✅ Выполнена" if task.get("completed") else "⏳ Не выполнена"
+                priority_emoji = {"high": "🔴", "middle": "🟡", "low": "🟢"}.get(task.get("priority", "").lower(), "")
+                context_parts.append(f"- Строка {task.get('row_number')}: {status} | {task.get('date')} {task.get('time')} | {priority_emoji} {task.get('priority', '').upper()} | {task.get('task', '')}")
+            context_parts.append("")
+        
+        context_parts.append(f"Команда пользователя: {text}")
+        context_parts.append("")
+        context_parts.append("ВАЖНО: Распознай намерение пользователя и верни JSON с действием:")
+        context_parts.append("- Если создание задачи: {\"action\": \"create\", \"date\": \"DD-MM-YYYY\", \"time\": \"HH:MM\", \"task\": \"описание\", \"priority\": \"high|middle|low\"}")
+        context_parts.append("- Если просмотр задач: {\"action\": \"list\", \"priority\": \"high|middle|low\" (опционально), \"completed\": true/false (опционально)}")
+        context_parts.append("- Если удаление задачи: {\"action\": \"delete\", \"row_number\": число}")
+        context_parts.append("- Если запрос рекомендаций: {\"action\": \"recommend\", \"priority\": \"high|middle|low\" (опционально)}")
+        context_parts.append("")
+        context_parts.append("Если пользователь просит показать задачи и дать рекомендации, используй action: \"recommend\".")
+        context_parts.append("Используй информацию из документации для рекомендаций (например, правила клуба о времени прихода).")
+        
+        user_content = "\n".join(context_parts)
+        
+        # System prompt для парсинга намерения
+        system_prompt = """Ты помощник для работы с задачами. Твоя задача - распознать намерение пользователя из его словесной команды и вернуть JSON с действием и параметрами.
+
+Доступные действия:
+1. create - создание задачи (требует: date, time, task, priority)
+2. list - просмотр задач (опционально: priority, completed)
+3. delete - удаление задачи (требует: row_number)
+4. recommend - рекомендации по задачам (опционально: priority)
+
+Верни ТОЛЬКО валидный JSON, без дополнительного текста."""
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": user_content})
+        
+        # Парсинг намерения
+        try:
+            intent_response = chat_completion(messages, temperature=0.3, model=model)
+            intent_response = (intent_response or "").strip()
+            
+            # Извлекаем JSON из ответа
+            json_match = re.search(r'\{[^}]+\}', intent_response, re.DOTALL)
+            if json_match:
+                intent_json = json.loads(json_match.group(0))
+            else:
+                # Пробуем распарсить весь ответ как JSON
+                intent_json = json.loads(intent_response)
+        except requests.exceptions.HTTPError as e:
+            # Ошибка от API (например, 500)
+            logger.exception(f"Error from LLM API: {e}")
+            error_msg = "❌ Временная ошибка сервиса. Попробуйте повторить запрос через несколько секунд."
+            # Если это простая команда на удаление, попробуем fallback
+            delete_match = re.search(r'(\d+)', text)
+            if delete_match and any(word in text_lower for word in ["удали", "удалить", "delete"]):
+                try:
+                    row_num = int(delete_match.group(1))
+                    result = await task_delete(row_num)
+                    if result:
+                        status = result.get("status", "deleted")
+                        if status == "cleared":
+                            await safe_reply_text(update, f"✅ Задача в строке {row_num} очищена (последняя строка данных)")
+                        else:
+                            await safe_reply_text(update, f"✅ Задача в строке {row_num} удалена")
+                        return
+                except Exception:
+                    pass
+            await safe_reply_text(update, error_msg)
+            return
+        except json.JSONDecodeError as e:
+            logger.exception(f"Error parsing JSON from LLM: {e}")
+            await safe_reply_text(update, f"❌ Не удалось распознать команду. Попробуйте сформулировать иначе.\nОтвет LLM: {intent_response[:100]}")
+            return
+        except Exception as e:
+            logger.exception(f"Error parsing intent: {e}")
+            await safe_reply_text(update, f"❌ Не удалось распознать команду. Попробуйте сформулировать иначе.\nОшибка: {e}")
+            return
+        
+        action = intent_json.get("action", "").lower()
+        
+        # Выполнение действия
+        if action == "create":
+            date = intent_json.get("date", "")
+            time = intent_json.get("time", "")
+            task_desc = intent_json.get("task", "")
+            priority = intent_json.get("priority", "middle").lower()
+            
+            if not date or not time or not task_desc:
+                await safe_reply_text(update, "❌ Не указаны обязательные параметры для создания задачи (дата, время, описание)")
+                return
+            
+            try:
+                result = await task_create(date, time, task_desc, priority)
+                if result:
+                    row_url = result.get("row_url", "")
+                    response_text = f"✅ Задача создана!\n📅 Дата: {date}\n⏰ Время: {time}\n📝 Задача: {task_desc}\n🎯 Приоритет: {priority.upper()}\nСтрока: {result.get('row_number')}"
+                    if row_url:
+                        response_text += f"\n🔗 Ссылка: {row_url}"
+                    await safe_reply_text(update, response_text)
+                else:
+                    await safe_reply_text(update, "❌ Ошибка при создании задачи")
+            except ValueError as e:
+                await safe_reply_text(update, f"❌ {e}")
+            except Exception as e:
+                logger.exception(f"Error creating task: {e}")
+                await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+        
+        elif action == "list":
+            priority_filter = intent_json.get("priority")
+            completed_filter = intent_json.get("completed")
+            
+            try:
+                tasks = await task_list(
+                    priority=priority_filter,
+                    completed=completed_filter
+                ) or []
+                
+                if not tasks:
+                    await safe_reply_text(update, "📋 Задач не найдено")
+                    return
+                
+                response_parts = ["📋 Список задач:\n"]
+                for task in tasks:
+                    status = "✅" if task.get("completed") else "⏳"
+                    priority_emoji = {"high": "🔴", "middle": "🟡", "low": "🟢"}.get(task.get("priority", "").lower(), "")
+                    response_parts.append(f"{status} Строка {task.get('row_number')}: {task.get('date')} {task.get('time')} | {priority_emoji} {task.get('priority', '').upper()} | {task.get('task', '')}")
+                
+                await safe_reply_text(update, "\n".join(response_parts))
+            except Exception as e:
+                logger.exception(f"Error listing tasks: {e}")
+                await safe_reply_text(update, f"❌ Ошибка при получении списка задач: {e}")
+        
+        elif action == "delete":
+            row_number = intent_json.get("row_number")
+            if not row_number:
+                await safe_reply_text(update, "❌ Не указан номер строки для удаления")
+                return
+            
+            try:
+                row_num = int(row_number)
+                result = await task_delete(row_num)
+                if result:
+                    status = result.get("status", "deleted")
+                    if status == "cleared":
+                        await safe_reply_text(update, f"✅ Задача в строке {row_num} очищена (последняя строка данных)")
+                    else:
+                        await safe_reply_text(update, f"✅ Задача в строке {row_num} удалена")
+                else:
+                    await safe_reply_text(update, f"❌ Не удалось удалить задачу в строке {row_num}")
+            except ValueError as e:
+                await safe_reply_text(update, f"❌ {e}")
+            except Exception as e:
+                logger.exception(f"Error deleting task: {e}")
+                await safe_reply_text(update, f"❌ Неизвестная ошибка: {e}")
+        
+        elif action == "recommend":
+            priority_filter = intent_json.get("priority")
+            
+            try:
+                # Получаем задачи для рекомендаций
+                tasks = await task_list(priority=priority_filter, completed=False) or []
+                
+                if not tasks:
+                    await safe_reply_text(update, "📋 Нет задач для рекомендаций")
+                    return
+                
+                # Формируем контекст для AI рекомендаций
+                tasks_context = []
+                for task in tasks:
+                    tasks_context.append(f"- Строка {task.get('row_number')}: {task.get('date')} {task.get('time')} | {task.get('priority', '').upper()} | {task.get('task', '')}")
+                
+                # RAG контекст для рекомендаций
+                rag_context = ""
+                if rag_chunks:
+                    rag_context = "\n\nРелевантная информация из документации:\n"
+                    for chunk in rag_chunks[:2]:  # Берем первые 2 чанка
+                        rag_context += f"- {chunk['text'][:200]}...\n"
+                
+                # Дополнительный поиск правил выполнения упражнений, если есть задачи с упражнениями
+                exercise_rules_context = ""
+                exercise_rules_chunks = []
+                exercise_keywords = ["присед", "отжаться", "подтянуться", "пресс", "упражнени", "ноги", "спина", "грудь"]
+                has_exercises = any(
+                    any(keyword in task.get("task", "").lower() for keyword in exercise_keywords)
+                    for task in tasks
+                )
+                
+                if has_exercises and has_embeddings(EMBEDDING_MODEL):
+                    try:
+                        # Специальный поиск правил выполнения упражнений
+                        exercise_rules_chunks = search_relevant_chunks(
+                            "правила выполнения упражнений последовательность ноги спина грудь пресс приоритет",
+                            model=EMBEDDING_MODEL,
+                            top_k=3,
+                            min_similarity=0.5,
+                            apply_threshold=True
+                        )
+                        if exercise_rules_chunks:
+                            exercise_rules_context = "\n\nПравила выполнения упражнений:\n"
+                            for chunk in exercise_rules_chunks:
+                                exercise_rules_context += f"- {chunk['text'][:300]}...\n"
+                    except Exception as e:
+                        logger.warning(f"Error searching exercise rules: {e}")
+                
+                recommendation_prompt = f"""Проанализируй следующие задачи и дай рекомендации, что делать первым:
+
+Задачи:
+{chr(10).join(tasks_context)}
+{rag_context}
+{exercise_rules_context}
+
+ВАЖНО: Если среди задач есть упражнения (приседания, отжимания, подтягивания, пресс и т.д.), обязательно используй правила выполнения упражнений из документации. Учитывай:
+1. Приоритет задачи (HIGH > MIDDLE > LOW) - главный критерий
+2. При одинаковом приоритете: упражнения на ноги → упражнения на верх тело (спина/грудь) → упражнения на пресс
+3. Подтягивания и отжимания можно выполнять в суперсете
+
+Дай конкретные рекомендации: какие задачи выполнить первыми и почему. Учитывай приоритеты, даты и информацию из документации."""
+                
+                rec_messages = [
+                    {"role": "system", "content": "Ты помощник по планированию задач. Дай конкретные и практичные рекомендации."},
+                    {"role": "user", "content": recommendation_prompt}
+                ]
+                
+                recommendation = chat_completion(rec_messages, temperature=0.7, model=model)
+                recommendation = (recommendation or "").strip()
+                
+                response_parts = [recommendation]
+                
+                # Добавляем источники, если есть RAG чанки
+                all_rag_chunks = []
+                if rag_chunks:
+                    all_rag_chunks.extend(rag_chunks)
+                if exercise_rules_chunks:
+                    all_rag_chunks.extend(exercise_rules_chunks)
+                
+                # Убираем дубликаты по doc_name и chunk_index
+                seen = set()
+                unique_chunks = []
+                for chunk in all_rag_chunks:
+                    key = (chunk.get("doc_name", ""), chunk.get("chunk_index", -1))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_chunks.append(chunk)
+                
+                if unique_chunks:
+                    response_parts.append("")
+                    response_parts.append("📚 Источники:")
+                    for chunk in unique_chunks[:3]:  # Показываем максимум 3 источника
+                        # Берем компактную цитату (до 120 символов, первое предложение)
+                        chunk_text = chunk["text"]
+                        # Убираем переносы строк и лишние пробелы
+                        chunk_text = " ".join(chunk_text.split())
+                        # Берем первое предложение или первые 120 символов
+                        sentences = chunk_text.split(". ")
+                        if sentences:
+                            quote = sentences[0]
+                            if len(quote) > 120:
+                                quote = quote[:120] + "..."
+                        else:
+                            quote = chunk_text[:120] + ("..." if len(chunk_text) > 120 else "")
+                        
+                        doc_name = chunk.get("doc_name", "unknown")
+                        # Убираем префикс docs/ если есть
+                        if doc_name.startswith("docs/"):
+                            doc_name = doc_name[5:]
+                        
+                        response_parts.append(f"- {doc_name}, chunk_index={chunk.get('chunk_index', 0)}, score={chunk.get('similarity', 0):.4f}")
+                        response_parts.append(f"  Цитата: {quote}")
+                
+                response_parts.append("")
+                response_parts.append("📋 Задачи для рассмотрения:")
+                for task in tasks[:10]:  # Показываем максимум 10 задач
+                    priority_emoji = {"high": "🔴", "middle": "🟡", "low": "🟢"}.get(task.get("priority", "").lower(), "")
+                    response_parts.append(f"• Строка {task.get('row_number')}: {task.get('date')} {task.get('time')} | {priority_emoji} {task.get('priority', '').upper()} | {task.get('task', '')}")
+                
+                await safe_reply_text(update, "\n".join(response_parts))
+            except Exception as e:
+                logger.exception(f"Error getting recommendations: {e}")
+                await safe_reply_text(update, f"❌ Ошибка при получении рекомендаций: {e}")
+        
+        else:
+            await safe_reply_text(update, f"❌ Неизвестное действие: {action}")
+    
+    except Exception as e:
+        logger.exception(f"Error in handle_task_list_message: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при обработке команды: {e}")
+
+
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2747,6 +3170,7 @@ async def post_init(app: Application) -> None:
         BotCommand("train_move", "Перенос записи (пример: /train_move 1 16-02-2026 19:00)"),
         BotCommand("train_cancel", "Отмена записи (пример: /train_cancel 1)"),
         BotCommand("support", "Поддержка с RAG (пример: /support можно перенести запись?)"),
+        BotCommand("task_list", "Режим работы с задачами"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -2834,6 +3258,7 @@ def run() -> None:
     app.add_handler(CommandHandler("train_move", train_move_cmd))
     app.add_handler(CommandHandler("train_cancel", train_cancel_cmd))
     app.add_handler(CommandHandler("support", support_cmd))
+    app.add_handler(CommandHandler("task_list", task_list_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

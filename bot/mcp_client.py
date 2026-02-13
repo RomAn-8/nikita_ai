@@ -715,3 +715,186 @@ async def reg_cancel(reg_id: int) -> bool:
             raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
         logger.exception(f"Exception canceling registration: {e}")
         raise ValueError(f"Ошибка при отмене записи: {e}")
+
+
+# ==================== Task Management MCP Client Functions ====================
+
+async def task_create(date: str, time: str, task: str, priority: str) -> dict[str, Any] | None:
+    """
+    Создать задачу в Google Sheets.
+    
+    Args:
+        date: Дата в формате DD-MM-YYYY
+        time: Время в формате HH:MM
+        task: Описание задачи
+        priority: Приоритет задачи (high/middle/low)
+        
+    Returns:
+        Словарь с данными созданной задачи или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "task_create",
+                    arguments={
+                        "date": date,
+                        "time": time,
+                        "task": task,
+                        "priority": priority,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error creating task: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse task creation response JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception creating task: {e}")
+        raise ValueError(f"Ошибка при создании задачи: {e}")
+
+
+async def task_list(priority: str | None = None, completed: bool | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict[str, Any]] | None:
+    """
+    Получить список задач с фильтрацией.
+    
+    Args:
+        priority: Фильтр по приоритету (high/middle/low, опционально)
+        completed: Фильтр по статусу выполнения (true/false, опционально)
+        date_from: Начальная дата для фильтрации (DD-MM-YYYY, опционально)
+        date_to: Конечная дата для фильтрации (DD-MM-YYYY, опционально)
+        
+    Returns:
+        Список словарей с данными задач или None в случае ошибки
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                arguments = {}
+                if priority is not None:
+                    arguments["priority"] = priority
+                if completed is not None:
+                    arguments["completed"] = completed
+                if date_from is not None:
+                    arguments["date_from"] = date_from
+                if date_to is not None:
+                    arguments["date_to"] = date_to
+                
+                result = await session.call_tool(
+                    "task_list",
+                    arguments=arguments,
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return []
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error getting task list: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse task list JSON: {e}")
+            raise ValueError(f"Не удалось разобрать ответ от MCP сервера: {e}")
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception getting task list: {e}")
+        raise ValueError(f"Ошибка при получении списка задач: {e}")
+
+
+async def task_delete(row_number: int) -> dict | None:
+    """
+    Удалить задачу из Google Sheets.
+    
+    Args:
+        row_number: Номер строки в Google Sheets (начиная с 2)
+        
+    Returns:
+        dict с полями status ("deleted" или "cleared") и message (опционально), или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "task_delete",
+                    arguments={"row_number": row_number},
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error deleting task: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            response_data = json.loads(response_text)
+            # Возвращаем dict с информацией о статусе
+            status = response_data.get("status")
+            if status in ["deleted", "cleared"]:
+                return {
+                    "status": status,
+                    "row_number": response_data.get("row_number", row_number),
+                    "message": response_data.get("message", "")
+                }
+            return None
+        except json.JSONDecodeError:
+            # Если не JSON, проверяем текстовый ответ
+            if "удален" in response_text.lower() or "deleted" in response_text.lower():
+                return {"status": "deleted", "row_number": row_number, "message": ""}
+            if "очищен" in response_text.lower() or "cleared" in response_text.lower():
+                return {"status": "cleared", "row_number": row_number, "message": ""}
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception deleting task: {e}")
+        raise ValueError(f"Ошибка при удалении задачи: {e}")
