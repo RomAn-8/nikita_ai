@@ -898,3 +898,473 @@ async def task_delete(row_number: int) -> dict | None:
             raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
         logger.exception(f"Exception deleting task: {e}")
         raise ValueError(f"Ошибка при удалении задачи: {e}")
+
+
+# ==================== DEPLOY FUNCTIONS ====================
+
+async def deploy_check_docker(host: str, port: int, username: str, password: str) -> dict | None:
+    """
+    Проверяет наличие Docker на сервере и устанавливает его, если отсутствует.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+    
+    Returns:
+        dict с результатом проверки/установки Docker или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_check_docker",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error checking Docker: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception checking Docker: {e}")
+        raise ValueError(f"Ошибка при проверке Docker: {e}")
+
+
+async def deploy_upload_image(host: str, port: int, username: str, password: str, image_tar_path: str, remote_path: str) -> dict | None:
+    """
+    Загружает Docker image (.tar файл) на сервер через SCP.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        image_tar_path: Локальный путь к Docker image .tar файлу
+        remote_path: Путь на сервере для сохранения файла
+    
+    Returns:
+        dict с результатом загрузки или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_upload_image",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "image_tar_path": image_tar_path,
+                        "remote_path": remote_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error uploading image: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception uploading image: {e}")
+        raise ValueError(f"Ошибка при загрузке образа: {e}")
+
+
+async def deploy_load_image(host: str, port: int, username: str, password: str, image_tar_path: str) -> dict | None:
+    """
+    Загружает Docker image в Docker на сервере.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        image_tar_path: Путь к .tar файлу на сервере
+    
+    Returns:
+        dict с результатом загрузки образа или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_load_image",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "image_tar_path": image_tar_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error loading image: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception loading image: {e}")
+        raise ValueError(f"Ошибка при загрузке образа в Docker: {e}")
+
+
+async def deploy_create_compose(host: str, port: int, username: str, password: str, compose_content: str, remote_path: str = "/opt/nikita_ai/docker-compose.yml") -> dict | None:
+    """
+    Создает или обновляет docker-compose.yml на сервере.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        compose_content: YAML содержимое docker-compose.yml
+        remote_path: Путь на сервере для сохранения файла
+    
+    Returns:
+        dict с результатом создания/обновления файла или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_create_compose",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "compose_content": compose_content,
+                        "remote_path": remote_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error creating compose: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception creating compose: {e}")
+        raise ValueError(f"Ошибка при создании docker-compose.yml: {e}")
+
+
+async def deploy_create_env(host: str, port: int, username: str, password: str, env_content: str, remote_path: str = "/opt/nikita_ai/.env") -> dict | None:
+    """
+    Создает или обновляет .env файл на сервере.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        env_content: Содержимое .env файла
+        remote_path: Путь на сервере для сохранения файла
+    
+    Returns:
+        dict с результатом создания/обновления файла или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_create_env",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "env_content": env_content,
+                        "remote_path": remote_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error creating env: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception creating env: {e}")
+        raise ValueError(f"Ошибка при создании .env файла: {e}")
+
+
+async def deploy_start_bot(host: str, port: int, username: str, password: str, compose_path: str = "/opt/nikita_ai/docker-compose.yml") -> dict | None:
+    """
+    Запускает бота через docker-compose на сервере.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        compose_path: Путь к docker-compose.yml на сервере
+    
+    Returns:
+        dict с результатом запуска или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_start_bot",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "compose_path": compose_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error starting bot: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception starting bot: {e}")
+        raise ValueError(f"Ошибка при запуске бота: {e}")
+
+
+async def deploy_check_container(host: str, port: int, username: str, password: str, container_name: str = "nikita_ai_bot") -> dict | None:
+    """
+    Проверяет статус контейнера и возвращает его логи.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        container_name: Имя контейнера
+    
+    Returns:
+        dict с результатом проверки и логами или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_check_container",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "container_name": container_name,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error checking container: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception checking container: {e}")
+        raise ValueError(f"Ошибка при проверке контейнера: {e}")
+
+
+async def deploy_read_env(host: str, port: int, username: str, password: str, env_path: str = "/opt/nikita_ai/.env") -> dict | None:
+    """
+    Читает содержимое .env файла на сервере (токены скрыты).
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        env_path: Путь к .env файлу на сервере
+    
+    Returns:
+        dict с содержимым .env файла или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_read_env",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "env_path": env_path,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error reading env: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception reading env: {e}")
+        raise ValueError(f"Ошибка при чтении .env файла: {e}")

@@ -14,7 +14,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -28,6 +28,7 @@ from .mcp_client import (
     user_get, user_register, user_block, user_unblock, user_delete,  # MCP-клиент для работы с пользователями
     reg_create, reg_find_by_user, reg_reschedule, reg_cancel,  # MCP-клиент для работы с записями
     task_create, task_list, task_delete,  # MCP-клиент для работы с задачами
+    deploy_check_docker, deploy_upload_image, deploy_load_image, deploy_create_compose, deploy_create_env, deploy_start_bot, deploy_check_container,  # MCP-клиент для деплоя
 )
 
 # Импортируем функции для анализа PR из скрипта
@@ -154,7 +155,8 @@ MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
 
 # -------------------- SQLITE MEMORY + SETTINGS --------------------
 
-DB_PATH = Path(__file__).resolve().parent / "bot_memory.sqlite3"
+# Путь к базе данных можно переопределить через переменную окружения
+DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).resolve().parent / "bot_memory.sqlite3")))
 MEMORY_LIMIT_MESSAGES = 30  # сколько последних сообщений хранить в контексте для LLM
 MEMORY_CHAT_MODES = ("text", "thinking", "experts", "rag")  # общая память между этими режимами
 
@@ -763,7 +765,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
         "/summary_debug — показать текущее summary (режим summary)",
     ]
-    
+
     if MODEL_GLM:
         lines.append(f"/model_glm — модель {_short_model_name(MODEL_GLM)}")
     if MODEL_GEMMA:
@@ -811,7 +813,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/train_cancel — отмена записи (пример: /train_cancel 1)",
         "/support — поддержка с RAG (пример: /support можно перенести запись?)",
         "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
-        "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
+        "",
+        "🚀 Деплой:",
+        "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
     ])
     
     if PR_REVIEW_AVAILABLE:
@@ -851,15 +855,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "📋 Доступные команды:",
             "",
             "🔧 Основные режимы:",
-            f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
-            "/mode_json — JSON на каждое сообщение",
-            f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
+        f"/mode_text — режим text + {_short_model_name(OPENROUTER_MODEL)}",
+        "/mode_json — JSON на каждое сообщение",
+        f"/mode_summary — режим summary + {_short_model_name(OPENROUTER_MODEL)} (сжатие истории)",
             "/summary_debug — показать текущее summary (режим summary)",
             "",
             "🤖 Специальные режимы:",
             "/tz_creation_site — собрать ТЗ на сайт (итог JSON)",
             "/forest_split — кто кому должен (итог текст)",
-            "/thinking_model — решать пошагово",
+        "/thinking_model — решать пошагово",
             "/expert_group_model — группа экспертов",
             "",
             "⚙️ Настройки:",
@@ -897,9 +901,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/support — поддержка с RAG (пример: /support можно перенести запись?)",
             "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
             "",
+            "🚀 Деплой:",
+            "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
+            "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
-        ]
+    ]
 
         if PR_REVIEW_AVAILABLE:
             lines.insert(-2, "/review_pr — анализ Pull Request (пример: /review_pr 123)")
@@ -1677,7 +1684,7 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Пример: /digest Самара, спорт"
         )
         return
-    
+
     # Объединяем все аргументы и разбиваем по запятой
     full_text = " ".join(context.args)
     parts = [p.strip() for p in full_text.split(",", 1)]
@@ -1689,7 +1696,7 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Пример: /digest Москва, технологии"
         )
         return
-    
+
     city = parts[0]
     news_topic = parts[1]
     
@@ -2188,7 +2195,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             db_add_message(chat_id, mode, "assistant", answer)
             
             await safe_reply_text(update, answer)
-            return
+        return
 
     # ---- CHAT MODES (text/thinking/experts/summary) ----
     if mode in ("text", "thinking", "experts", MODE_SUMMARY):
@@ -2756,6 +2763,208 @@ async def task_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await safe_reply_text(update, welcome_text)
 
 
+async def deploy_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /deploy_bot - деплой бота на сервер"""
+    if not update.message:
+        return
+    
+    try:
+        # Читаем переменные окружения для деплоя
+        deploy_ssh_host = os.getenv("DEPLOY_SSH_HOST", "").strip()
+        deploy_ssh_port = int(os.getenv("DEPLOY_SSH_PORT", "22"))
+        deploy_ssh_username = os.getenv("DEPLOY_SSH_USERNAME", "").strip()
+        deploy_ssh_password = os.getenv("DEPLOY_SSH_PASSWORD", "").strip()
+        deploy_image_tar_path = os.getenv("DEPLOY_IMAGE_TAR_PATH", "").strip()
+        deploy_remote_path = os.getenv("DEPLOY_REMOTE_PATH", "/opt/nikita_ai").strip()
+        
+        # Переменная для тестового бота (единственная, которая отличается от основного бота)
+        deploy_bot_token = os.getenv("DEPLOY_BOT_TOKEN", "").strip()
+        
+        # Остальные настройки используем из config.py (те же, что и для основного бота)
+        deploy_openrouter_api_key = OPENROUTER_API_KEY
+        deploy_openrouter_model = OPENROUTER_MODEL
+        deploy_embedding_model = EMBEDDING_MODEL
+        deploy_rag_sim_threshold = str(RAG_SIM_THRESHOLD)
+        deploy_rag_top_k = str(RAG_TOP_K)
+        
+        # Проверяем наличие обязательных переменных
+        missing_vars = []
+        if not deploy_ssh_host:
+            missing_vars.append("DEPLOY_SSH_HOST")
+        if not deploy_ssh_username:
+            missing_vars.append("DEPLOY_SSH_USERNAME")
+        if not deploy_ssh_password:
+            missing_vars.append("DEPLOY_SSH_PASSWORD")
+        if not deploy_image_tar_path:
+            missing_vars.append("DEPLOY_IMAGE_TAR_PATH")
+        if not deploy_bot_token:
+            missing_vars.append("DEPLOY_BOT_TOKEN")
+        
+        if missing_vars:
+            await safe_reply_text(
+                update,
+                f"❌ Отсутствуют обязательные переменные окружения:\n" + "\n".join(f"• {var}" for var in missing_vars)
+            )
+            return
+        
+        # Проверяем существование файла образа
+        image_path = Path(deploy_image_tar_path)
+        if not image_path.exists():
+            await safe_reply_text(update, f"❌ Файл образа не найден: {deploy_image_tar_path}")
+            return
+        
+        # Определяем имя образа из пути
+        image_name = image_path.stem.replace("_latest", "").replace("_", "-") or "nikita-ai-bot"
+        image_tag = "latest"
+        
+        await safe_reply_text(update, "🚀 Начинаю деплой бота на сервер...")
+        
+        # 1. Проверка/установка Docker
+        await safe_reply_text(update, "📦 Проверяю наличие Docker на сервере...")
+        docker_result = await deploy_check_docker(deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password)
+        if not docker_result or docker_result.get("status") != "installed":
+            error_msg = docker_result.get("message", "Неизвестная ошибка") if docker_result else "Ошибка при проверке Docker"
+            await safe_reply_text(update, f"❌ Ошибка при проверке Docker: {error_msg}")
+            return
+        await safe_reply_text(update, f"✅ {docker_result.get('message', 'Docker готов')}")
+        
+        # 2. Загрузка образа на сервер
+        remote_image_path = f"{deploy_remote_path}/{image_path.name}"
+        await safe_reply_text(update, f"📤 Загружаю образ на сервер: {deploy_image_tar_path}...")
+        upload_result = await deploy_upload_image(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            deploy_image_tar_path, remote_image_path
+        )
+        if not upload_result or upload_result.get("status") != "success":
+            error_msg = upload_result.get("message", "Неизвестная ошибка") if upload_result else "Ошибка при загрузке образа"
+            await safe_reply_text(update, f"❌ Ошибка при загрузке образа: {error_msg}")
+            return
+        await safe_reply_text(update, f"✅ {upload_result.get('message', 'Образ загружен')}")
+        
+        # 3. Загрузка образа в Docker
+        await safe_reply_text(update, "🐳 Загружаю образ в Docker...")
+        load_result = await deploy_load_image(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            remote_image_path
+        )
+        if not load_result or load_result.get("status") != "success":
+            error_msg = load_result.get("message", "Неизвестная ошибка") if load_result else "Ошибка при загрузке образа в Docker"
+            await safe_reply_text(update, f"❌ Ошибка при загрузке образа в Docker: {error_msg}")
+            return
+        await safe_reply_text(update, f"✅ {load_result.get('message', 'Образ загружен в Docker')}")
+        
+        # 4. Создание docker-compose.yml
+        compose_path = f"{deploy_remote_path}/docker-compose.yml"
+        compose_content = f"""version: '3.8'
+services:
+  bot:
+    image: {image_name}:{image_tag}
+    container_name: nikita_ai_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/bot_memory.sqlite3
+    volumes:
+      - ./data:/app/data
+      - ./digests:/app/bot/digests
+    user: "0:0"
+"""
+        await safe_reply_text(update, "📝 Создаю docker-compose.yml...")
+        compose_result = await deploy_create_compose(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            compose_content, compose_path
+        )
+        if not compose_result or compose_result.get("status") != "success":
+            error_msg = compose_result.get("message", "Неизвестная ошибка") if compose_result else "Ошибка при создании docker-compose.yml"
+            await safe_reply_text(update, f"❌ Ошибка при создании docker-compose.yml: {error_msg}")
+            return
+        compose_msg = compose_result.get('message', 'docker-compose.yml создан')
+        if compose_result.get('skipped'):
+            await safe_reply_text(update, f"⏭️ {compose_msg}")
+        else:
+            await safe_reply_text(update, f"✅ {compose_msg}")
+        
+        # 5. Создание .env файла с данными тестового бота
+        env_path = f"{deploy_remote_path}/.env"
+        env_content = f"""TELEGRAM_BOT_TOKEN={deploy_bot_token}
+OPENROUTER_API_KEY={deploy_openrouter_api_key}
+OPENROUTER_MODEL={deploy_openrouter_model}
+EMBEDDING_MODEL={deploy_embedding_model}
+RAG_SIM_THRESHOLD={deploy_rag_sim_threshold}
+RAG_TOP_K={deploy_rag_top_k}
+"""
+        await safe_reply_text(update, "📝 Проверяю .env файл...")
+        env_result = await deploy_create_env(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            env_content, env_path
+        )
+        if not env_result or env_result.get("status") != "success":
+            error_msg = env_result.get("message", "Неизвестная ошибка") if env_result else "Ошибка при создании .env файла"
+            await safe_reply_text(update, f"❌ Ошибка при создании .env файла: {error_msg}")
+            return
+        env_msg = env_result.get('message', '.env файл создан')
+        if env_result.get('skipped'):
+            await safe_reply_text(update, f"⏭️ {env_msg}")
+        else:
+            await safe_reply_text(update, f"✅ {env_msg}")
+        
+        # 6. Запуск бота
+        await safe_reply_text(update, "🚀 Запускаю бота...")
+        start_result = await deploy_start_bot(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            compose_path
+        )
+        if not start_result or start_result.get("status") != "success":
+            error_msg = start_result.get("message", "Неизвестная ошибка") if start_result else "Ошибка при запуске бота"
+            await safe_reply_text(update, f"❌ Ошибка при запуске бота: {error_msg}")
+            return
+        
+        # Ждем немного, чтобы контейнер успел запуститься
+        import asyncio
+        await asyncio.sleep(3)
+        
+        # Проверяем статус контейнера и логи
+        await safe_reply_text(update, "🔍 Проверяю статус контейнера...")
+        container_result = await deploy_check_container(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password
+        )
+        
+        if container_result:
+            container_status = container_result.get("container_status", "неизвестно")
+            container_list = container_result.get("container_list", "")
+            container_id = container_result.get("container_id", "")
+            logs = container_result.get("logs", "")
+            # Берем последние 1000 символов логов, чтобы не перегружать сообщение
+            logs_preview = logs[-1000:] if len(logs) > 1000 else logs
+            
+            status_msg = f"✅ Деплой завершен успешно!\n\n"
+            status_msg += f"Бот запущен на сервере {deploy_ssh_host}\n"
+            status_msg += f"Путь: {deploy_remote_path}\n"
+            status_msg += f"Контейнер: nikita_ai_bot\n"
+            status_msg += f"Статус: {container_status}\n"
+            if container_id:
+                status_msg += f"ID: {container_id}\n"
+            if container_list:
+                status_msg += f"\nВсе контейнеры:\n{container_list}\n"
+            status_msg += f"\nПоследние логи:\n```\n{logs_preview}\n```"
+            
+            await safe_reply_text(update, status_msg)
+        else:
+            await safe_reply_text(
+                update,
+                f"✅ Деплой завершен успешно!\n\n"
+                f"Бот запущен на сервере {deploy_ssh_host}\n"
+                f"Путь: {deploy_remote_path}\n"
+                f"Контейнер: nikita_ai_bot\n\n"
+                f"⚠️ Не удалось получить логи контейнера. Проверьте вручную: docker logs nikita_ai_bot"
+            )
+        
+    except Exception as e:
+        logger.exception(f"Error in deploy_bot_cmd: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при деплое: {e}")
+
+
 async def handle_task_list_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, temperature: float, model: str) -> None:
     """Обработчик сообщений в режиме task_list"""
     if not update.message:
@@ -3259,6 +3468,7 @@ def run() -> None:
     app.add_handler(CommandHandler("train_cancel", train_cancel_cmd))
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("task_list", task_list_cmd))
+    app.add_handler(CommandHandler("deploy_bot", deploy_bot_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

@@ -1,0 +1,23 @@
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.idea/
+.vscode/
+bot/bot_memory.sqlite3
+secrets/
+*.json
+# Docker files (user requested to not commit)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.yaml
+compose.yml
+compose.yaml
+docker-compose.override.yml
+docker-compose.override.yaml
+*.tar
+*.tar.gz
+*.tgz
