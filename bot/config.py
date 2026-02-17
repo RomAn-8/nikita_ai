@@ -22,6 +22,13 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 # Альтернативы: openai/text-embedding-3-small, openai/text-embedding-3-large, jina/jina-embeddings-v3-small
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-ada-002").strip()
 
+# Ollama настройки
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b").strip()
+# Таймаут в секундах (диапазон 120-300)
+OLLAMA_TIMEOUT_RAW = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+OLLAMA_TIMEOUT = max(120, min(300, OLLAMA_TIMEOUT_RAW))  # Ограничиваем диапазон 120-300
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
 

@@ -1368,3 +1368,65 @@ async def deploy_read_env(host: str, port: int, username: str, password: str, en
             raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
         logger.exception(f"Exception reading env: {e}")
         raise ValueError(f"Ошибка при чтении .env файла: {e}")
+
+
+async def deploy_stop_bot(host: str, port: int, username: str, password: str, compose_path: str = "/opt/nikita_ai/docker-compose.yml", remove_volumes: bool = False, remove_images: bool = False) -> dict | None:
+    """
+    Останавливает и удаляет бота с сервера.
+    
+    Args:
+        host: SSH host сервера
+        port: SSH port
+        username: SSH username
+        password: SSH password
+        compose_path: Путь к docker-compose.yml на сервере
+        remove_volumes: Удалять ли volumes (данные)
+        remove_images: Удалять ли Docker образы
+    
+    Returns:
+        dict с результатом остановки или None при ошибке
+    """
+    try:
+        async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "deploy_stop_bot",
+                    arguments={
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "password": password,
+                        "compose_path": compose_path,
+                        "remove_volumes": remove_volumes,
+                        "remove_images": remove_images,
+                    },
+                )
+        
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+        
+        if not parts:
+            return None
+        
+        response_text = " ".join(p.strip() for p in parts if p.strip())
+        if response_text.startswith("Ошибка") or response_text.lower().startswith("error:"):
+            logger.error(f"Error stopping bot: {response_text}")
+            raise ValueError(response_text)
+        
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return None
+    
+    except ValueError:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "Connection" in error_msg or "refused" in error_msg.lower():
+            raise ValueError(f"Не удалось подключиться к MCP серверу по адресу {MCP_SERVER_URL}")
+        logger.exception(f"Exception stopping bot: {e}")
+        raise ValueError(f"Ошибка при остановке бота: {e}")

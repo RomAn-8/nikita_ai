@@ -14,7 +14,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -28,7 +28,7 @@ from .mcp_client import (
     user_get, user_register, user_block, user_unblock, user_delete,  # MCP-клиент для работы с пользователями
     reg_create, reg_find_by_user, reg_reschedule, reg_cancel,  # MCP-клиент для работы с записями
     task_create, task_list, task_delete,  # MCP-клиент для работы с задачами
-    deploy_check_docker, deploy_upload_image, deploy_load_image, deploy_create_compose, deploy_create_env, deploy_start_bot, deploy_check_container,  # MCP-клиент для деплоя
+    deploy_check_docker, deploy_upload_image, deploy_load_image, deploy_create_compose, deploy_create_env, deploy_start_bot, deploy_check_container, deploy_stop_bot,  # MCP-клиент для деплоя
 )
 
 # Импортируем функции для анализа PR из скрипта
@@ -900,9 +900,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/train_cancel — отмена записи (пример: /train_cancel 1)",
             "/support — поддержка с RAG (пример: /support можно перенести запись?)",
             "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
+            "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
             "",
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
+            "/stop_bot — остановить бота на сервере (опции: -v удалить данные, -i удалить образы)",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -1972,6 +1974,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_task_list_message(update, context, text, temperature=temperature, model=model)
         return
 
+    # ---- LOCAL MODEL MODE (OLLAMA) ----
+    if mode == "local_model":
+        try:
+            answer = await send_to_ollama(text)
+            await safe_reply_text(update, answer)
+        except ConnectionError as e:
+            await safe_reply_text(update, f"❌ {str(e)}")
+        except Exception as e:
+            logger.exception("Error in local_model mode")
+            await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
+        return
+
     # ---- RAG MODE ----
     if mode == "rag":
         # Получаем текущий подрежим или устанавливаем по умолчанию
@@ -2965,6 +2979,69 @@ RAG_TOP_K={deploy_rag_top_k}
         await safe_reply_text(update, f"❌ Ошибка при деплое: {e}")
 
 
+async def stop_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /stop_bot - остановка и удаление бота с сервера."""
+    if not update.message:
+        return
+
+    try:
+        # Читаем переменные окружения для деплоя
+        deploy_ssh_host = os.getenv("DEPLOY_SSH_HOST", "").strip()
+        deploy_ssh_port = int(os.getenv("DEPLOY_SSH_PORT", "22"))
+        deploy_ssh_username = os.getenv("DEPLOY_SSH_USERNAME", "").strip()
+        deploy_ssh_password = os.getenv("DEPLOY_SSH_PASSWORD", "").strip()
+        deploy_remote_path = os.getenv("DEPLOY_REMOTE_PATH", "/opt/nikita_ai").strip()
+        
+        # Проверяем наличие обязательных переменных
+        if not deploy_ssh_host or not deploy_ssh_username or not deploy_ssh_password:
+            await safe_reply_text(
+                update,
+                "❌ Ошибка: Не заданы переменные окружения для деплоя.\n\n"
+                "Необходимо задать:\n"
+                "- DEPLOY_SSH_HOST\n"
+                "- DEPLOY_SSH_USERNAME\n"
+                "- DEPLOY_SSH_PASSWORD"
+            )
+            return
+        
+        compose_path = f"{deploy_remote_path}/docker-compose.yml"
+        
+        # Парсим аргументы команды
+        args = context.args or []
+        remove_volumes = "--remove-volumes" in args or "-v" in args
+        remove_images = "--remove-images" in args or "-i" in args
+        
+        await safe_reply_text(update, "🛑 Останавливаю бота на сервере...")
+        
+        stop_result = await deploy_stop_bot(
+            deploy_ssh_host, deploy_ssh_port, deploy_ssh_username, deploy_ssh_password,
+            compose_path, remove_volumes, remove_images
+        )
+        
+        if not stop_result or stop_result.get("status") != "success":
+            error_msg = stop_result.get("message", "Неизвестная ошибка") if stop_result else "Ошибка при остановке бота"
+            await safe_reply_text(update, f"❌ Ошибка при остановке бота: {error_msg}")
+            return
+        
+        details = stop_result.get("details", [])
+        details_text = "\n".join(f"• {d}" for d in details) if details else ""
+        
+        await safe_reply_text(
+            update,
+            f"✅ {stop_result.get('message', 'Бот остановлен')}\n\n"
+            f"{details_text}\n\n"
+            f"Использование:\n"
+            f"/stop_bot - остановить контейнер\n"
+            f"/stop_bot -v - остановить и удалить данные\n"
+            f"/stop_bot -i - остановить и удалить образы\n"
+            f"/stop_bot -v -i - полное удаление"
+        )
+        
+    except Exception as e:
+        logger.exception(f"Error in stop_bot_cmd: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при остановке бота: {e}")
+
+
 async def handle_task_list_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, temperature: float, model: str) -> None:
     """Обработчик сообщений в режиме task_list"""
     if not update.message:
@@ -3338,6 +3415,98 @@ async def handle_task_list_message(update: Update, context: ContextTypes.DEFAULT
         await safe_reply_text(update, f"❌ Ошибка при обработке команды: {e}")
 
 
+# -------------------- LOCAL MODEL (OLLAMA) --------------------
+
+async def send_to_ollama(question: str) -> str:
+    """Отправляет запрос в Ollama API и возвращает ответ модели."""
+    try:
+        # Формируем URL для запроса
+        api_url = f"{OLLAMA_BASE_URL}/api/chat"
+        
+        # Формируем payload для Ollama API
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "user", "content": question}
+            ],
+            "stream": False
+        }
+        
+        logger.info(f"Sending request to Ollama: {api_url}, model: {OLLAMA_MODEL}")
+        
+        # Отправляем POST запрос
+        response = requests.post(
+            api_url,
+            json=payload,
+            timeout=OLLAMA_TIMEOUT
+        )
+        
+        # Проверяем статус ответа
+        response.raise_for_status()
+        
+        # Парсим ответ
+        data = response.json()
+        
+        # Извлекаем текст ответа из структуры Ollama
+        # Формат ответа: {"message": {"content": "текст ответа"}}
+        if "message" in data and "content" in data["message"]:
+            answer = data["message"]["content"].strip()
+            if answer:
+                return answer
+            else:
+                raise ValueError("Модель вернула пустой ответ")
+        else:
+            logger.warning(f"Unexpected Ollama response structure: {data}")
+            raise ValueError("Неожиданный формат ответа от модели")
+            
+    except requests.exceptions.Timeout:
+        logger.exception("Ollama request timeout")
+        raise ConnectionError("Локальная модель недоступна (таймаут)")
+    except requests.exceptions.ConnectionError:
+        logger.exception("Ollama connection error")
+        raise ConnectionError("Локальная модель недоступна (ошибка подключения)")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
+        logger.exception(f"Ollama HTTP error: {status_code}")
+        raise ConnectionError(f"Ошибка при обращении к локальной модели (HTTP {status_code})")
+    except Exception as e:
+        logger.exception("Unexpected error in send_to_ollama")
+        raise
+
+
+async def local_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /local_model - переключение в режим локальной модели Ollama или отправка запроса"""
+    if not update.message:
+        return
+    
+    # Если аргументов нет - переключаем режим
+    if not context.args:
+        chat_id = int(update.effective_chat.id) if update.effective_chat else 0
+        context.user_data["mode"] = "local_model"
+        reset_tz(context)
+        reset_forest(context)
+        
+        await safe_reply_text(
+            update,
+            f"✅ Режим локальной модели Ollama активирован.\n"
+            f"Модель: {OLLAMA_MODEL}\n"
+            f"Теперь все ваши сообщения будут обрабатываться через локальную модель.\n"
+            f"Для выхода из режима используйте /mode_text или другой режим."
+        )
+        return
+    
+    # Если есть аргументы - отправляем запрос сразу
+    question = " ".join(context.args)
+    
+    try:
+        answer = await send_to_ollama(question)
+        await safe_reply_text(update, answer)
+    except ConnectionError as e:
+        await safe_reply_text(update, f"❌ {str(e)}")
+    except Exception as e:
+        await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
+
+
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3380,6 +3549,7 @@ async def post_init(app: Application) -> None:
         BotCommand("train_cancel", "Отмена записи (пример: /train_cancel 1)"),
         BotCommand("support", "Поддержка с RAG (пример: /support можно перенести запись?)"),
         BotCommand("task_list", "Режим работы с задачами"),
+        BotCommand("local_model", f"Режим локальной модели Ollama (переключение режима)"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -3469,6 +3639,8 @@ def run() -> None:
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("task_list", task_list_cmd))
     app.add_handler(CommandHandler("deploy_bot", deploy_bot_cmd))
+    app.add_handler(CommandHandler("stop_bot", stop_bot_cmd))
+    app.add_handler(CommandHandler("local_model", local_model_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
