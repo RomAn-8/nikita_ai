@@ -2801,6 +2801,11 @@ async def deploy_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         deploy_rag_sim_threshold = str(RAG_SIM_THRESHOLD)
         deploy_rag_top_k = str(RAG_TOP_K)
         
+        # Настройки Ollama для сервера
+        deploy_ollama_base_url = "http://127.0.0.1:11434"  # Локальный адрес на сервере
+        deploy_ollama_model = OLLAMA_MODEL  # Из config.py (можно задать в локальном .env)
+        deploy_ollama_timeout = str(OLLAMA_TIMEOUT)  # Из config.py
+        
         # Проверяем наличие обязательных переменных
         missing_vars = []
         if not deploy_ssh_host:
@@ -2827,8 +2832,8 @@ async def deploy_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply_text(update, f"❌ Файл образа не найден: {deploy_image_tar_path}")
             return
         
-        # Определяем имя образа из пути
-        image_name = image_path.stem.replace("_latest", "").replace("_", "-") or "nikita-ai-bot"
+        # Используем фиксированное имя образа (должно совпадать с именем при сохранении в .tar)
+        image_name = "nikita_ai"  # Имя образа с подчеркиванием (как в docker save)
         image_tag = "latest"
         
         await safe_reply_text(update, "🚀 Начинаю деплой бота на сервер...")
@@ -2869,12 +2874,12 @@ async def deploy_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # 4. Создание docker-compose.yml
         compose_path = f"{deploy_remote_path}/docker-compose.yml"
-        compose_content = f"""version: '3.8'
-services:
+        compose_content = f"""services:
   bot:
     image: {image_name}:{image_tag}
     container_name: nikita_ai_bot
     restart: unless-stopped
+    network_mode: host
     env_file:
       - .env
     environment:
@@ -2907,6 +2912,9 @@ OPENROUTER_MODEL={deploy_openrouter_model}
 EMBEDDING_MODEL={deploy_embedding_model}
 RAG_SIM_THRESHOLD={deploy_rag_sim_threshold}
 RAG_TOP_K={deploy_rag_top_k}
+OLLAMA_BASE_URL={deploy_ollama_base_url}
+OLLAMA_MODEL={deploy_ollama_model}
+OLLAMA_TIMEOUT={deploy_ollama_timeout}
 """
         await safe_reply_text(update, "📝 Проверяю .env файл...")
         env_result = await deploy_create_env(
