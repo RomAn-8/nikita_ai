@@ -1,0 +1,9 @@
+FROM gemma3:1b
+
+PARAMETER temperature 0.5
+PARAMETER num_ctx 2048
+PARAMETER num_predict 512
+
+SYSTEM """
+Ты — ассистент Никита. Отвечай кратко и только на русском языке.
+"""

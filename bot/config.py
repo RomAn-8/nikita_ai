@@ -29,6 +29,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b").strip()
 OLLAMA_TIMEOUT_RAW = int(os.getenv("OLLAMA_TIMEOUT", "120"))
 OLLAMA_TIMEOUT = max(120, min(300, OLLAMA_TIMEOUT_RAW))  # Ограничиваем диапазон 120-300
 
+# Параметры модели Ollama
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.5"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+OLLAMA_SYSTEM_PROMPT = os.getenv("OLLAMA_SYSTEM_PROMPT", "Ты — ассистент Никита. Отвечай точно, кратко и только на русском языке. Если ты не уверен в ответе или не знаешь точной информации, честно скажи об этом. Не выдумывай факты. Отвечай только на основе реальных знаний.").strip()
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
 

@@ -14,7 +14,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -1976,9 +1976,78 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ---- LOCAL MODEL MODE (OLLAMA) ----
     if mode == "local_model":
+        text_lower = text.lower().strip()
+        
+        # Обработка словесных команд
+        # Изменить температуру
+        temp_match = re.search(r'изменить\s+температуру\s+([\d.]+)', text_lower)
+        if temp_match:
+            try:
+                new_temp = float(temp_match.group(1))
+                if 0.0 <= new_temp <= 2.0:
+                    context.user_data["ollama_temperature"] = new_temp
+                    await safe_reply_text(update, f"✅ Температура изменена на {new_temp}")
+                else:
+                    await safe_reply_text(update, "❌ Температура должна быть в диапазоне от 0.0 до 2.0")
+                return
+            except ValueError:
+                await safe_reply_text(update, "❌ Неверный формат температуры")
+                return
+        
+        # Изменить контекстное окно
+        ctx_match = re.search(r'изменить\s+контекстное\s+окно\s+(\d+)', text_lower)
+        if ctx_match:
+            try:
+                new_ctx = int(ctx_match.group(1))
+                if new_ctx > 0:
+                    context.user_data["ollama_num_ctx"] = new_ctx
+                    await safe_reply_text(update, f"✅ Контекстное окно изменено на {new_ctx}")
+                else:
+                    await safe_reply_text(update, "❌ Контекстное окно должно быть больше 0")
+                return
+            except ValueError:
+                await safe_reply_text(update, "❌ Неверный формат контекстного окна")
+                return
+        
+        # Изменить максимальную длину ответа
+        predict_match = re.search(r'изменить\s+максимальную\s+длину\s+ответа\s+(\d+)', text_lower)
+        if predict_match:
+            try:
+                new_predict = int(predict_match.group(1))
+                if new_predict > 0:
+                    context.user_data["ollama_num_predict"] = new_predict
+                    await safe_reply_text(update, f"✅ Максимальная длина ответа изменена на {new_predict}")
+                else:
+                    await safe_reply_text(update, "❌ Максимальная длина ответа должна быть больше 0")
+                return
+            except ValueError:
+                await safe_reply_text(update, "❌ Неверный формат максимальной длины ответа")
+                return
+        
+        # Показать текущие настройки
+        if "показать текущие настройки модели" in text_lower or "показать настройки" in text_lower:
+            settings_text = _get_ollama_settings_display(context.user_data)
+            await safe_reply_text(update, settings_text)
+            return
+        
+        # Сбросить настройки к значениям по умолчанию
+        if "сбросить настройки модели" in text_lower or "сбросить настройки" in text_lower:
+            # Удаляем пользовательские настройки
+            context.user_data.pop("ollama_temperature", None)
+            context.user_data.pop("ollama_num_ctx", None)
+            context.user_data.pop("ollama_num_predict", None)
+            context.user_data.pop("ollama_system_prompt", None)
+            settings_text = _get_ollama_settings_display(context.user_data)
+            await safe_reply_text(update, f"✅ Настройки сброшены к значениям по умолчанию:\n\n{settings_text}")
+            return
+        
+        # Если это не команда - отправляем запрос в модель
         try:
-            answer = await send_to_ollama(text)
+            answer = await send_to_ollama(text, context.user_data)
             await safe_reply_text(update, answer)
+        except ValueError as e:
+            # Ошибки валидации или от модели
+            await safe_reply_text(update, f"❌ {str(e)}\n\n💡 Попробуйте сбросить настройки командой: сбросить настройки модели")
         except ConnectionError as e:
             await safe_reply_text(update, f"❌ {str(e)}")
         except Exception as e:
@@ -2805,6 +2874,10 @@ async def deploy_bot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         deploy_ollama_base_url = "http://127.0.0.1:11434"  # Локальный адрес на сервере
         deploy_ollama_model = OLLAMA_MODEL  # Из config.py (можно задать в локальном .env)
         deploy_ollama_timeout = str(OLLAMA_TIMEOUT)  # Из config.py
+        deploy_ollama_temperature = str(OLLAMA_TEMPERATURE)  # Из config.py
+        deploy_ollama_num_ctx = str(OLLAMA_NUM_CTX)  # Из config.py
+        deploy_ollama_num_predict = str(OLLAMA_NUM_PREDICT)  # Из config.py
+        deploy_ollama_system_prompt = OLLAMA_SYSTEM_PROMPT  # Из config.py
         
         # Проверяем наличие обязательных переменных
         missing_vars = []
@@ -2915,6 +2988,10 @@ RAG_TOP_K={deploy_rag_top_k}
 OLLAMA_BASE_URL={deploy_ollama_base_url}
 OLLAMA_MODEL={deploy_ollama_model}
 OLLAMA_TIMEOUT={deploy_ollama_timeout}
+OLLAMA_TEMPERATURE={deploy_ollama_temperature}
+OLLAMA_NUM_CTX={deploy_ollama_num_ctx}
+OLLAMA_NUM_PREDICT={deploy_ollama_num_predict}
+OLLAMA_SYSTEM_PROMPT={deploy_ollama_system_prompt}
 """
         await safe_reply_text(update, "📝 Проверяю .env файл...")
         env_result = await deploy_create_env(
@@ -3425,22 +3502,51 @@ async def handle_task_list_message(update: Update, context: ContextTypes.DEFAULT
 
 # -------------------- LOCAL MODEL (OLLAMA) --------------------
 
-async def send_to_ollama(question: str) -> str:
+async def send_to_ollama(question: str, user_data: dict = None) -> str:
     """Отправляет запрос в Ollama API и возвращает ответ модели."""
     try:
+        # Получаем настройки из user_data или используем значения по умолчанию из config
+        temperature = float(user_data.get("ollama_temperature", OLLAMA_TEMPERATURE)) if user_data else OLLAMA_TEMPERATURE
+        num_ctx = int(user_data.get("ollama_num_ctx", OLLAMA_NUM_CTX)) if user_data else OLLAMA_NUM_CTX
+        num_predict = int(user_data.get("ollama_num_predict", OLLAMA_NUM_PREDICT)) if user_data else OLLAMA_NUM_PREDICT
+        system_prompt = user_data.get("ollama_system_prompt", OLLAMA_SYSTEM_PROMPT) if user_data else OLLAMA_SYSTEM_PROMPT
+        
+        # Валидация параметров
+        if not (0.0 <= temperature <= 2.0):
+            raise ValueError(f"Температура должна быть в диапазоне от 0.0 до 2.0, получено: {temperature}")
+        if num_ctx <= 0 or num_ctx > 32768:
+            raise ValueError(f"Контекстное окно должно быть от 1 до 32768, получено: {num_ctx}")
+        if num_predict <= 0 or num_predict > 8192:
+            raise ValueError(f"Максимальная длина ответа должна быть от 1 до 8192, получено: {num_predict}")
+        
         # Формируем URL для запроса
         api_url = f"{OLLAMA_BASE_URL}/api/chat"
+        
+        # Формируем сообщения
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        # Улучшаем пользовательский запрос, добавляя инструкцию о точности
+        enhanced_question = question
+        # Если вопрос содержит "что такое" или похожие запросы, добавляем контекст
+        if any(phrase in question.lower() for phrase in ["что такое", "объясни", "расскажи", "парадокс", "гипотеза"]):
+            enhanced_question = f"{question}\n\nВажно: отвечай точно, основываясь на реальных фактах. Если не уверен, скажи об этом."
+        messages.append({"role": "user", "content": enhanced_question})
         
         # Формируем payload для Ollama API
         payload = {
             "model": OLLAMA_MODEL,
-            "messages": [
-                {"role": "user", "content": question}
-            ],
-            "stream": False
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict
+            }
         }
         
-        logger.info(f"Sending request to Ollama: {api_url}, model: {OLLAMA_MODEL}")
+        logger.info(f"Sending request to Ollama: {api_url}, model: {OLLAMA_MODEL}, temperature: {temperature}, num_ctx: {num_ctx}, num_predict: {num_predict}")
+        logger.debug(f"Ollama payload: {payload}")
         
         # Отправляем POST запрос
         response = requests.post(
@@ -3449,19 +3555,29 @@ async def send_to_ollama(question: str) -> str:
             timeout=OLLAMA_TIMEOUT
         )
         
+        logger.debug(f"Ollama response status: {response.status_code}")
+        
         # Проверяем статус ответа
         response.raise_for_status()
         
         # Парсим ответ
         data = response.json()
         
+        # Проверяем наличие ошибки в ответе
+        if "error" in data:
+            error_msg = data.get("error", "Неизвестная ошибка")
+            logger.error(f"Ollama API error: {error_msg}, full response: {data}")
+            raise ValueError(f"Ошибка модели: {error_msg}")
+        
         # Извлекаем текст ответа из структуры Ollama
         # Формат ответа: {"message": {"content": "текст ответа"}}
         if "message" in data and "content" in data["message"]:
             answer = data["message"]["content"].strip()
             if answer:
+                logger.info(f"Ollama response received, length: {len(answer)}")
                 return answer
             else:
+                logger.warning(f"Ollama returned empty content, full response: {data}")
                 raise ValueError("Модель вернула пустой ответ")
         else:
             logger.warning(f"Unexpected Ollama response structure: {data}")
@@ -3475,11 +3591,38 @@ async def send_to_ollama(question: str) -> str:
         raise ConnectionError("Локальная модель недоступна (ошибка подключения)")
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
+        error_body = ""
+        if hasattr(e, 'response') and e.response:
+            try:
+                error_body = e.response.text
+                logger.error(f"Ollama HTTP error {status_code}: {error_body}")
+            except:
+                pass
         logger.exception(f"Ollama HTTP error: {status_code}")
         raise ConnectionError(f"Ошибка при обращении к локальной модели (HTTP {status_code})")
-    except Exception as e:
-        logger.exception("Unexpected error in send_to_ollama")
+    except ValueError as e:
+        # Передаем ValueError как есть (это ошибки от модели)
+        logger.error(f"Ollama model error: {str(e)}")
         raise
+    except Exception as e:
+        logger.exception(f"Unexpected error in send_to_ollama: {type(e).__name__}: {str(e)}")
+        raise ConnectionError(f"Неожиданная ошибка при обращении к локальной модели: {str(e)}")
+
+
+def _get_ollama_settings_display(user_data: dict = None) -> str:
+    """Формирует строку с текущими настройками модели."""
+    temperature = float(user_data.get("ollama_temperature", OLLAMA_TEMPERATURE)) if user_data else OLLAMA_TEMPERATURE
+    num_ctx = int(user_data.get("ollama_num_ctx", OLLAMA_NUM_CTX)) if user_data else OLLAMA_NUM_CTX
+    num_predict = int(user_data.get("ollama_num_predict", OLLAMA_NUM_PREDICT)) if user_data else OLLAMA_NUM_PREDICT
+    system_prompt = user_data.get("ollama_system_prompt", OLLAMA_SYSTEM_PROMPT) if user_data else OLLAMA_SYSTEM_PROMPT
+    
+    return (
+        f"📊 Текущие настройки модели:\n"
+        f"• Температура: {temperature}\n"
+        f"• Контекстное окно: {num_ctx}\n"
+        f"• Максимальная длина ответа: {num_predict}\n"
+        f"• Системный промпт: {system_prompt[:50]}{'...' if len(system_prompt) > 50 else ''}"
+    )
 
 
 async def local_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3494,21 +3637,99 @@ async def local_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reset_tz(context)
         reset_forest(context)
         
+        settings_text = _get_ollama_settings_display(context.user_data)
+        
         await safe_reply_text(
             update,
             f"✅ Режим локальной модели Ollama активирован.\n"
-            f"Модель: {OLLAMA_MODEL}\n"
+            f"Модель: {OLLAMA_MODEL}\n\n"
+            f"{settings_text}\n\n"
             f"Теперь все ваши сообщения будут обрабатываться через локальную модель.\n"
-            f"Для выхода из режима используйте /mode_text или другой режим."
+            f"Для выхода из режима используйте /mode_text или другой режим.\n\n"
+            f"💡 Команды для изменения настроек:\n"
+            f"• \"изменить температуру 0.7\"\n"
+            f"• \"изменить контекстное окно 4096\"\n"
+            f"• \"изменить максимальную длину ответа 512\"\n"
+            f"• \"показать текущие настройки модели\"\n"
+            f"• \"сбросить настройки модели\""
         )
         return
     
-    # Если есть аргументы - отправляем запрос сразу
+    # Получаем текст команды
+    text = " ".join(context.args).strip().lower()
+    
+    # Обработка словесных команд
+    # Изменить температуру
+    temp_match = re.search(r'изменить\s+температуру\s+([\d.]+)', text)
+    if temp_match:
+        try:
+            new_temp = float(temp_match.group(1))
+            if 0.0 <= new_temp <= 2.0:
+                context.user_data["ollama_temperature"] = new_temp
+                await safe_reply_text(update, f"✅ Температура изменена на {new_temp}")
+            else:
+                await safe_reply_text(update, "❌ Температура должна быть в диапазоне от 0.0 до 2.0")
+            return
+        except ValueError:
+            await safe_reply_text(update, "❌ Неверный формат температуры")
+            return
+    
+    # Изменить контекстное окно
+    ctx_match = re.search(r'изменить\s+контекстное\s+окно\s+(\d+)', text)
+    if ctx_match:
+        try:
+            new_ctx = int(ctx_match.group(1))
+            if new_ctx > 0:
+                context.user_data["ollama_num_ctx"] = new_ctx
+                await safe_reply_text(update, f"✅ Контекстное окно изменено на {new_ctx}")
+            else:
+                await safe_reply_text(update, "❌ Контекстное окно должно быть больше 0")
+            return
+        except ValueError:
+            await safe_reply_text(update, "❌ Неверный формат контекстного окна")
+            return
+    
+    # Изменить максимальную длину ответа
+    predict_match = re.search(r'изменить\s+максимальную\s+длину\s+ответа\s+(\d+)', text)
+    if predict_match:
+        try:
+            new_predict = int(predict_match.group(1))
+            if new_predict > 0:
+                context.user_data["ollama_num_predict"] = new_predict
+                await safe_reply_text(update, f"✅ Максимальная длина ответа изменена на {new_predict}")
+            else:
+                await safe_reply_text(update, "❌ Максимальная длина ответа должна быть больше 0")
+            return
+        except ValueError:
+            await safe_reply_text(update, "❌ Неверный формат максимальной длины ответа")
+            return
+    
+    # Показать текущие настройки
+    if "показать текущие настройки модели" in text or "показать настройки" in text:
+        settings_text = _get_ollama_settings_display(context.user_data)
+        await safe_reply_text(update, settings_text)
+        return
+    
+    # Сбросить настройки к значениям по умолчанию
+    if "сбросить настройки модели" in text or "сбросить настройки" in text:
+        # Удаляем пользовательские настройки
+        context.user_data.pop("ollama_temperature", None)
+        context.user_data.pop("ollama_num_ctx", None)
+        context.user_data.pop("ollama_num_predict", None)
+        context.user_data.pop("ollama_system_prompt", None)
+        settings_text = _get_ollama_settings_display(context.user_data)
+        await safe_reply_text(update, f"✅ Настройки сброшены к значениям по умолчанию:\n\n{settings_text}")
+        return
+    
+    # Если это не команда - отправляем запрос в модель
     question = " ".join(context.args)
     
     try:
-        answer = await send_to_ollama(question)
+        answer = await send_to_ollama(question, context.user_data)
         await safe_reply_text(update, answer)
+    except ValueError as e:
+        # Ошибки валидации или от модели
+        await safe_reply_text(update, f"❌ {str(e)}\n\n💡 Попробуйте сбросить настройки командой: сбросить настройки модели")
     except ConnectionError as e:
         await safe_reply_text(update, f"❌ {str(e)}")
     except Exception as e:
