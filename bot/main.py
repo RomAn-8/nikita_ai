@@ -14,7 +14,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -901,6 +901,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/support — поддержка с RAG (пример: /support можно перенести запись?)",
             "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
             "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
+            "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
             "",
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
@@ -1464,13 +1465,43 @@ async def rag_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Обработчик документов: обрабатывает .md файлы для создания эмбеддингов.
+    Обработчик документов: обрабатывает .md файлы для создания эмбеддингов и JSON файлы для анализа.
     """
     if not update.message or not update.message.document:
         return
     
     document = update.message.document
     file_name = document.file_name or ""
+    
+    # Проверяем режим analyze и обработку JSON файлов
+    mode = context.user_data.get("mode")
+    if mode == "analyze" and file_name.lower().endswith(".json"):
+        try:
+            # Скачиваем файл
+            file = await context.bot.get_file(document.file_id)
+            
+            # Читаем содержимое
+            file_content_bytes = await file.download_as_bytearray()
+            file_content = file_content_bytes.decode("utf-8", errors="replace")
+            
+            # Парсим JSON для валидации
+            try:
+                json.loads(file_content)
+            except json.JSONDecodeError as e:
+                await safe_reply_text(update, f"❌ Ошибка: файл не является валидным JSON. {str(e)}")
+                return
+            
+            # Сохраняем содержимое JSON
+            context.user_data["analyze_json_content"] = file_content
+            
+            await safe_reply_text(
+                update,
+                "Файл получен! Что хочешь узнать? Например: какая ошибка встречается чаще всего?"
+            )
+        except Exception as e:
+            logger.exception(f"Error processing JSON file {file_name}: {e}")
+            await safe_reply_text(update, f"❌ Ошибка при обработке файла {file_name}: {e}")
+        return
     
     # Проверяем, что это .md файл
     if not file_name.lower().endswith(".md"):
@@ -2052,6 +2083,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_reply_text(update, f"❌ {str(e)}")
         except Exception as e:
             logger.exception("Error in local_model mode")
+            await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
+        return
+
+    # ---- ANALYZE MODE ----
+    if mode == "analyze":
+        # Проверяем наличие JSON данных
+        json_content = context.user_data.get("analyze_json_content")
+        if not json_content:
+            await safe_reply_text(update, "❌ JSON файл не загружен. Отправь JSON файл с логами для анализа.")
+            return
+        
+        # Отправляем запрос в Ollama для анализа
+        try:
+            answer = await send_to_ollama_analyze(json_content, text)
+            await safe_reply_text(update, answer)
+        except ConnectionError as e:
+            await safe_reply_text(update, f"❌ {str(e)}")
+        except ValueError as e:
+            await safe_reply_text(update, f"❌ {str(e)}")
+        except Exception as e:
+            logger.exception("Error in analyze mode")
             await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
         return
 
@@ -3609,6 +3661,95 @@ async def send_to_ollama(question: str, user_data: dict = None) -> str:
         raise ConnectionError(f"Неожиданная ошибка при обращении к локальной модели: {str(e)}")
 
 
+async def send_to_ollama_analyze(json_content: str, question: str) -> str:
+    """Отправляет запрос в Ollama API для анализа JSON данных и возвращает ответ модели."""
+    try:
+        # Формируем URL для запроса
+        api_url = f"{OLLAMA_BASE_URL}/api/chat"
+        
+        # Системный промпт для анализа логов
+        system_prompt = "Ты — ассистент для анализа логов. Анализируй предоставленные JSON данные и отвечай на вопросы пользователя. Отвечай точно, кратко и только на русском языке."
+        
+        # Формируем сообщения
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"JSON данные:\n{json_content}\n\nВопрос: {question}"}
+        ]
+        
+        # Формируем payload для Ollama API
+        payload = {
+            "model": ANALYZE_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": OLLAMA_TEMPERATURE,
+                "num_ctx": OLLAMA_NUM_CTX,
+                "num_predict": OLLAMA_NUM_PREDICT
+            }
+        }
+        
+        logger.info(f"Sending analyze request to Ollama: {api_url}, model: {ANALYZE_MODEL}")
+        logger.debug(f"Ollama analyze payload: {payload}")
+        
+        # Отправляем POST запрос
+        response = requests.post(
+            api_url,
+            json=payload,
+            timeout=OLLAMA_TIMEOUT
+        )
+        
+        logger.debug(f"Ollama analyze response status: {response.status_code}")
+        
+        # Проверяем статус ответа
+        response.raise_for_status()
+        
+        # Парсим ответ
+        data = response.json()
+        
+        # Проверяем наличие ошибки в ответе
+        if "error" in data:
+            error_msg = data.get("error", "Неизвестная ошибка")
+            logger.error(f"Ollama API error: {error_msg}, full response: {data}")
+            raise ValueError(f"Ошибка модели: {error_msg}")
+        
+        # Извлекаем текст ответа из структуры Ollama
+        if "message" in data and "content" in data["message"]:
+            answer = data["message"]["content"].strip()
+            if answer:
+                logger.info(f"Ollama analyze response received, length: {len(answer)}")
+                return answer
+            else:
+                logger.warning(f"Ollama returned empty content, full response: {data}")
+                raise ValueError("Модель вернула пустой ответ")
+        else:
+            logger.warning(f"Unexpected Ollama response structure: {data}")
+            raise ValueError("Неожиданный формат ответа от модели")
+            
+    except requests.exceptions.Timeout:
+        logger.exception("Ollama analyze request timeout")
+        raise ConnectionError("Локальная модель недоступна (таймаут)")
+    except requests.exceptions.ConnectionError:
+        logger.exception("Ollama analyze connection error")
+        raise ConnectionError("Локальная модель недоступна (ошибка подключения)")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
+        error_body = ""
+        if hasattr(e, 'response') and e.response:
+            try:
+                error_body = e.response.text
+                logger.error(f"Ollama HTTP error {status_code}: {error_body}")
+            except:
+                pass
+        logger.exception(f"Ollama HTTP error: {status_code}")
+        raise ConnectionError(f"Ошибка при обращении к локальной модели (HTTP {status_code})")
+    except ValueError as e:
+        logger.error(f"Ollama model error: {str(e)}")
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error in send_to_ollama_analyze: {type(e).__name__}: {str(e)}")
+        raise ConnectionError(f"Неожиданная ошибка при обращении к локальной модели: {str(e)}")
+
+
 def _get_ollama_settings_display(user_data: dict = None) -> str:
     """Формирует строку с текущими настройками модели."""
     temperature = float(user_data.get("ollama_temperature", OLLAMA_TEMPERATURE)) if user_data else OLLAMA_TEMPERATURE
@@ -3736,6 +3877,21 @@ async def local_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
 
 
+# -------------------- ANALYZE COMMAND --------------------
+
+async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /analyze - анализ JSON файлов с логами через Ollama"""
+    if not update.message:
+        return
+    
+    # Устанавливаем режим analyze
+    context.user_data["mode"] = "analyze"
+    # Очищаем предыдущие данные анализа
+    context.user_data.pop("analyze_json_content", None)
+    
+    await safe_reply_text(update, "Отправь JSON файл с логами для анализа")
+
+
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3779,6 +3935,7 @@ async def post_init(app: Application) -> None:
         BotCommand("support", "Поддержка с RAG (пример: /support можно перенести запись?)"),
         BotCommand("task_list", "Режим работы с задачами"),
         BotCommand("local_model", f"Режим локальной модели Ollama (переключение режима)"),
+        BotCommand("analyze", "Анализ JSON логов через Ollama"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -3870,6 +4027,7 @@ def run() -> None:
     app.add_handler(CommandHandler("deploy_bot", deploy_bot_cmd))
     app.add_handler(CommandHandler("stop_bot", stop_bot_cmd))
     app.add_handler(CommandHandler("local_model", local_model_cmd))
+    app.add_handler(CommandHandler("analyze", analyze_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

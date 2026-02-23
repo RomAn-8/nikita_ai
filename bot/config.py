@@ -35,6 +35,9 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
 OLLAMA_SYSTEM_PROMPT = os.getenv("OLLAMA_SYSTEM_PROMPT", "Ты — ассистент Никита. Отвечай точно, кратко и только на русском языке. Если ты не уверен в ответе или не знаешь точной информации, честно скажи об этом. Не выдумывай факты. Отвечай только на основе реальных знаний.").strip()
 
+# Модель для анализа JSON логов
+ANALYZE_MODEL = os.getenv("ANALYZE_MODEL", "gemma3:1b").strip()
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
 
