@@ -14,7 +14,7 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH
 from .openrouter import chat_completion, chat_completion_raw
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
@@ -132,6 +132,154 @@ def _city_prepositional_case(city: str) -> str:
     
     # Если не подошло ни одно правило, возвращаем как есть
     return city
+
+
+# -------------------- USER PROFILE FUNCTIONS --------------------
+
+def load_user_profile() -> dict:
+    """Загружает профиль пользователя из JSON файла. Создает базовый профиль, если файл не существует."""
+    try:
+        if not USER_PROFILE_PATH.exists():
+            # Создаем базовый профиль
+            default_profile = {
+                "name": "",
+                "interests": [],
+                "communication_style": "",
+                "habits": [],
+                "preferences": {}
+            }
+            save_user_profile(default_profile)
+            return default_profile
+        
+        with open(USER_PROFILE_PATH, "r", encoding="utf-8") as f:
+            profile = json.load(f)
+            # Убеждаемся, что все необходимые поля присутствуют
+            default_profile = {
+                "name": "",
+                "interests": [],
+                "communication_style": "",
+                "habits": [],
+                "preferences": {}
+            }
+            for key in default_profile:
+                if key not in profile:
+                    profile[key] = default_profile[key]
+            return profile
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing user profile JSON: {e}")
+        raise ValueError("Профиль пользователя содержит невалидный JSON. Попробуйте восстановить файл.")
+    except Exception as e:
+        logger.error(f"Error loading user profile: {e}")
+        raise ValueError(f"Ошибка при загрузке профиля: {e}")
+
+
+def save_user_profile(profile: dict) -> None:
+    """Сохраняет профиль пользователя в JSON файл."""
+    try:
+        # Создаем директорию, если её нет
+        USER_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(USER_PROFILE_PATH, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving user profile: {e}")
+        raise ValueError(f"Ошибка при сохранении профиля: {e}")
+
+
+def build_me_system_prompt(profile: dict) -> str:
+    """Создает системный промпт для персонального ассистента на основе профиля пользователя."""
+    profile_text = json.dumps(profile, ensure_ascii=False, indent=2)
+    return f"""Ты — персональный агент пользователя. Вот что ты о нем знаешь:
+
+{profile_text}
+
+Твоя задача — помогать ему, исходя из его привычек и интересов. Отвечай в его любимом стиле общения."""
+
+
+def update_profile_from_text(text: str) -> dict:
+    """Обновляет профиль пользователя, извлекая новые факты из текста через Gemini."""
+    try:
+        # Загружаем текущий профиль
+        current_profile = load_user_profile()
+        
+        # Создаем промпт для Gemini
+        profile_structure = json.dumps({
+            "name": "",
+            "interests": [],
+            "communication_style": "",
+            "habits": [],
+            "preferences": {}
+        }, ensure_ascii=False, indent=2)
+        
+        update_prompt = f"""Извлеки из этого сообщения новые факты о пользователе и верни обновленный JSON-профиль.
+
+Текущий профиль:
+{json.dumps(current_profile, ensure_ascii=False, indent=2)}
+
+Сообщение пользователя:
+{text}
+
+ВАЖНО:
+1. Сохрани все существующие данные из текущего профиля
+2. Добавь новые факты из сообщения
+3. Обнови существующие поля, если в сообщении есть более актуальная информация
+4. Верни ТОЛЬКО валидный JSON без дополнительных объяснений
+5. Структура должна соответствовать этой схеме:
+{profile_structure}
+
+Верни только JSON объект."""
+        
+        messages = [
+            {"role": "user", "content": update_prompt}
+        ]
+        
+        # Отправляем запрос в Gemini через OpenRouter
+        response = chat_completion(messages, temperature=0.3, model=ME_MODEL)
+        
+        if not response:
+            raise ValueError("Модель не вернула ответ при обновлении профиля")
+        
+        # Пытаемся извлечь JSON из ответа (может быть обернут в markdown код блоки)
+        response_clean = response.strip()
+        
+        # Удаляем markdown код блоки, если есть
+        if response_clean.startswith("```json"):
+            response_clean = response_clean[7:]
+        elif response_clean.startswith("```"):
+            response_clean = response_clean[3:]
+        
+        if response_clean.endswith("```"):
+            response_clean = response_clean[:-3]
+        
+        response_clean = response_clean.strip()
+        
+        # Парсим JSON
+        try:
+            updated_profile = json.loads(response_clean)
+            
+            # Валидируем структуру
+            required_keys = {"name", "interests", "communication_style", "habits", "preferences"}
+            if not all(key in updated_profile for key in required_keys):
+                raise ValueError("Профиль не содержит все необходимые поля")
+            
+            # Убеждаемся, что interests и habits - это списки
+            if not isinstance(updated_profile.get("interests"), list):
+                updated_profile["interests"] = []
+            if not isinstance(updated_profile.get("habits"), list):
+                updated_profile["habits"] = []
+            if not isinstance(updated_profile.get("preferences"), dict):
+                updated_profile["preferences"] = {}
+            
+            return updated_profile
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON from Gemini response: {e}")
+            logger.error(f"Response was: {response_clean[:500]}")
+            raise ValueError("Модель вернула невалидный JSON. Попробуйте еще раз или обновите профиль вручную.")
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating profile from text: {e}")
+        raise ValueError(f"Ошибка при обновлении профиля: {e}")
 
 
 # -------------------- TEMPERATURE --------------------
@@ -814,6 +962,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/support — поддержка с RAG (пример: /support можно перенести запись?)",
         "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
         "",
+        "🤖 Локальные модели:",
+        "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
+        "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
+        "/me — персональный ассистент (использует профиль пользователя, команды: 'Обновить профиль', 'Кто я?')",
+        "",
         "🚀 Деплой:",
         "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
     ])
@@ -902,6 +1055,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
             "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
             "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
+            "/me — персональный ассистент (использует профиль пользователя, команды: 'Обновить профиль', 'Кто я?')",
             "",
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
@@ -2104,6 +2258,110 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_reply_text(update, f"❌ {str(e)}")
         except Exception as e:
             logger.exception("Error in analyze mode")
+            await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
+        return
+
+    # ---- ME MODE (PERSONAL ASSISTANT) ----
+    if mode == "me":
+        text_lower = text.lower().strip()
+        
+        # Команда "Обновить профиль [текст]"
+        update_profile_match = re.match(r'^обновить\s+профиль\s+(.+)$', text, re.IGNORECASE)
+        if update_profile_match:
+            update_text = update_profile_match.group(1).strip()
+            if not update_text:
+                await safe_reply_text(update, "❌ Укажите текст с информацией о себе после команды 'Обновить профиль'")
+                return
+            
+            try:
+                await safe_reply_text(update, "⏳ Обновляю профиль...")
+                updated_profile = update_profile_from_text(update_text)
+                save_user_profile(updated_profile)
+                await safe_reply_text(update, "✅ Профиль успешно обновлен!")
+            except ValueError as e:
+                await safe_reply_text(update, f"❌ {str(e)}")
+            except Exception as e:
+                logger.exception("Error updating profile")
+                await safe_reply_text(update, f"❌ Ошибка при обновлении профиля: {str(e)}")
+            return
+        
+        # Команда "Кто я?"
+        if text_lower == "кто я?" or text_lower == "кто я":
+            try:
+                profile = load_user_profile()
+                
+                profile_text = "👤 **Ваш профиль:**\n\n"
+                
+                if profile.get("name"):
+                    profile_text += f"**Имя:** {profile['name']}\n"
+                
+                if profile.get("interests"):
+                    interests_str = ", ".join(profile["interests"]) if isinstance(profile["interests"], list) else str(profile["interests"])
+                    profile_text += f"**Интересы:** {interests_str}\n"
+                
+                if profile.get("communication_style"):
+                    profile_text += f"**Стиль общения:** {profile['communication_style']}\n"
+                
+                if profile.get("habits"):
+                    habits_str = ", ".join(profile["habits"]) if isinstance(profile["habits"], list) else str(profile["habits"])
+                    profile_text += f"**Привычки:** {habits_str}\n"
+                
+                if profile.get("preferences") and isinstance(profile["preferences"], dict) and profile["preferences"]:
+                    prefs_str = ", ".join([f"{k}: {v}" for k, v in profile["preferences"].items()])
+                    profile_text += f"**Предпочтения:** {prefs_str}\n"
+                
+                # Если профиль пустой
+                if not any([profile.get("name"), profile.get("interests"), profile.get("communication_style"), 
+                           profile.get("habits"), (profile.get("preferences") and profile["preferences"])]):
+                    profile_text += "Профиль пока пуст. Используйте команду 'Обновить профиль [текст]' для добавления информации о себе."
+                
+                await safe_reply_text(update, profile_text)
+            except Exception as e:
+                logger.exception("Error loading profile for display")
+                await safe_reply_text(update, f"❌ Ошибка при загрузке профиля: {str(e)}")
+            return
+        
+        # Обычные сообщения - отправляем в OpenRouter с системным промптом из профиля
+        try:
+            # Загружаем профиль
+            profile = load_user_profile()
+            
+            # Создаем системный промпт
+            system_prompt = build_me_system_prompt(profile)
+            
+            # Формируем сообщения
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ]
+            
+            logger.debug(f"ME mode: sending request to model {ME_MODEL}, messages count: {len(messages)}")
+            
+            # Отправляем запрос в OpenRouter
+            answer = chat_completion(messages, temperature=temperature, model=ME_MODEL)
+            
+            if not answer:
+                await safe_reply_text(update, "❌ Модель не вернула ответ. Попробуйте еще раз.")
+                return
+            
+            await safe_reply_text(update, answer)
+        except requests.exceptions.HTTPError as e:
+            error_msg = str(e)
+            if "400" in error_msg or "Bad Request" in error_msg:
+                await safe_reply_text(
+                    update,
+                    f"❌ Ошибка запроса к модели {ME_MODEL}.\n"
+                    f"Возможно, модель недоступна или указана неверно.\n"
+                    f"Проверьте настройку ME_MODEL в .env файле.\n\n"
+                    f"Детали: {error_msg}"
+                )
+            else:
+                await safe_reply_text(update, f"❌ Ошибка API: {error_msg}")
+            logger.exception("HTTPError in me mode")
+        except ValueError as e:
+            await safe_reply_text(update, f"❌ {str(e)}")
+        except Exception as e:
+            logger.exception("Error in me mode")
             await safe_reply_text(update, f"❌ Ошибка при обработке запроса: {str(e)}")
         return
 
@@ -3892,6 +4150,46 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await safe_reply_text(update, "Отправь JSON файл с логами для анализа")
 
 
+# -------------------- ME COMMAND (PERSONAL ASSISTANT) --------------------
+
+async def me_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /me - переключение в режим персонального ассистента"""
+    if not update.message:
+        return
+    
+    # Переключаем режим на "me"
+    context.user_data["mode"] = "me"
+    reset_tz(context)
+    reset_forest(context)
+    
+    # Загружаем профиль для проверки
+    try:
+        profile = load_user_profile()
+        profile_info = ""
+        if profile.get("name"):
+            profile_info = f"\n👤 Имя: {profile['name']}"
+        if profile.get("interests"):
+            profile_info += f"\n🎯 Интересы: {', '.join(profile['interests'][:3])}"
+            if len(profile['interests']) > 3:
+                profile_info += "..."
+    except Exception as e:
+        logger.warning(f"Error loading profile in me_cmd: {e}")
+        profile_info = "\n⚠️ Профиль не загружен. Используйте команду 'Обновить профиль' для создания профиля."
+    
+    await safe_reply_text(
+        update,
+        f"✅ Режим персонального ассистента активирован.\n"
+        f"Модель: {ME_MODEL}\n"
+        f"{profile_info}\n\n"
+        f"Теперь все ваши сообщения будут обрабатываться через персонального ассистента.\n"
+        f"Для выхода из режима используйте /mode_text или другой режим.\n\n"
+        f"💡 Команды:\n"
+        f"• \"Обновить профиль [текст]\" - обновить информацию о себе\n"
+        f"• \"Кто я?\" - показать текущий профиль\n"
+        f"• Обычные сообщения - общение с персональным ассистентом"
+    )
+
+
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3936,6 +4234,7 @@ async def post_init(app: Application) -> None:
         BotCommand("task_list", "Режим работы с задачами"),
         BotCommand("local_model", f"Режим локальной модели Ollama (переключение режима)"),
         BotCommand("analyze", "Анализ JSON логов через Ollama"),
+        BotCommand("me", "Персональный ассистент"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4028,6 +4327,7 @@ def run() -> None:
     app.add_handler(CommandHandler("stop_bot", stop_bot_cmd))
     app.add_handler(CommandHandler("local_model", local_model_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
+    app.add_handler(CommandHandler("me", me_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

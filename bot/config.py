@@ -38,6 +38,15 @@ OLLAMA_SYSTEM_PROMPT = os.getenv("OLLAMA_SYSTEM_PROMPT", "Ты — ассист�
 # Модель для анализа JSON логов
 ANALYZE_MODEL = os.getenv("ANALYZE_MODEL", "gemma3:1b").strip()
 
+# Модель для персонального ассистента /me
+# По умолчанию используем OPENROUTER_MODEL, если ME_MODEL не указан
+ME_MODEL = os.getenv("ME_MODEL", "").strip()
+if not ME_MODEL:
+    ME_MODEL = OPENROUTER_MODEL  # Fallback на основную модель
+
+# Путь к файлу профиля пользователя
+USER_PROFILE_PATH = PROJECT_ROOT / "config" / "user_profile.json"
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
 
