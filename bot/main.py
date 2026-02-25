@@ -6,6 +6,7 @@ import re
 import sqlite3
 import logging
 import requests
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,8 +15,8 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH
-from .openrouter import chat_completion, chat_completion_raw
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH, VOICE_MODEL, VOICE_SYSTEM_PROMPT
+from .openrouter import chat_completion, chat_completion_raw, transcribe_audio
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1056,6 +1057,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
             "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
             "/me — персональный ассистент (использует профиль пользователя, команды: 'Обновить профиль', 'Кто я?')",
+            "/voice — голосовой ассистент (отправьте голосовое сообщение для распознавания и ответа, для выхода: /stop или /cancel)",
             "",
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
@@ -1729,6 +1731,121 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_reply_text(update, f"❌ Ошибка при обработке файла {file_name}: {e}")
 
 
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик голосовых сообщений и аудиофайлов в режиме voice"""
+    if not update.message:
+        return
+    
+    # Проверяем режим voice
+    mode = get_mode(context)
+    if mode != "voice":
+        return  # Игнорируем голосовые сообщения вне режима voice
+    
+    # Определяем тип аудио: голосовое сообщение или аудиофайл
+    voice = update.message.voice
+    audio = update.message.audio
+    
+    if not voice and not audio:
+        return
+    
+    # Используем голосовое сообщение, если есть, иначе аудиофайл
+    audio_source = voice if voice else audio
+    audio_type = "voice" if voice else "audio_file"
+    
+    try:
+        # Показываем, что обрабатываем
+        await update.message.chat.send_action("typing")
+        
+        # Скачиваем аудио
+        file = await context.bot.get_file(audio_source.file_id)
+        audio_bytes = await file.download_as_bytearray()
+        
+        # Определяем MIME-тип
+        if audio:  # Аудиофайл
+            # Пытаемся определить MIME-тип из расширения файла
+            file_name = audio.file_name or ""
+            if file_name.lower().endswith('.mp3'):
+                mime_type = "audio/mpeg"
+            elif file_name.lower().endswith('.wav'):
+                mime_type = "audio/wav"
+            elif file_name.lower().endswith('.ogg'):
+                mime_type = "audio/ogg"
+            elif file_name.lower().endswith('.m4a'):
+                mime_type = "audio/mp4"
+            else:
+                mime_type = "audio/ogg"  # По умолчанию
+        else:  # Голосовое сообщение
+            # Telegram голосовые обычно в формате OGG Opus
+            mime_type = "audio/ogg"
+        
+        # Логируем для отладки
+        logger.info(f"Processing {audio_type}: size={len(audio_bytes)} bytes, mime_type={mime_type}, file_id={audio_source.file_id}")
+        
+        # Двухэтапный подход: сначала распознаем речь через Whisper, затем отправляем текст в Voxtral
+        try:
+            # Этап 1: Распознавание речи через VOICE_MODEL
+            logger.info(f"Step 1: Transcribing audio using {VOICE_MODEL}")
+            # Используем mime_type из объекта voice/audio, если доступен, иначе используем определенный ранее
+            source_mime_type = audio_source.mime_type if hasattr(audio_source, 'mime_type') and audio_source.mime_type else mime_type
+            transcribed_text = transcribe_audio(audio_bytes, model=VOICE_MODEL, mime_type=source_mime_type, timeout=120)
+            
+            if not transcribed_text or not transcribed_text.strip():
+                await safe_reply_text(update, "❌ Не удалось распознать речь из аудио. Попробуй ещё раз.")
+                return
+            
+            logger.info(f"Transcribed text: {transcribed_text[:200]}")
+            
+            # Этап 2: Отправляем распознанный текст в основную модель для ответа
+            logger.info(f"Step 2: Sending transcribed text to {OPENROUTER_MODEL} for response")
+            
+            # Формируем системный промпт
+            system_prompt = VOICE_SYSTEM_PROMPT
+            
+            # Логируем финальный текст, который отправляется в LLM
+            logger.info(f"[FINAL TEXT TO LLM]: {transcribed_text}")
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": transcribed_text}
+            ]
+            
+            answer = chat_completion(messages, temperature=0.7, model=OPENROUTER_MODEL, timeout=120)
+            
+            if not answer:
+                await safe_reply_text(update, "❌ Модель не вернула ответ. Попробуй ещё раз.")
+                return
+            
+            logger.info(f"Model response: {answer[:200]}")
+            # Отправляем только ответ модели (не отправляем распознанный текст)
+            chunks = split_telegram_text(answer)
+            if chunks:
+                await update.message.reply_text(chunks[0])
+            
+        except requests.exceptions.HTTPError as e:
+            logger.exception("OpenRouter HTTP error in voice mode")
+            await safe_reply_text(update, "❌ Сервис временно недоступен")
+        except requests.exceptions.ConnectionError as e:
+            logger.exception("OpenRouter connection error in voice mode")
+            error_msg = str(e)
+            if "getaddrinfo failed" in error_msg or "11001" in error_msg:
+                await safe_reply_text(update, "❌ Ошибка подключения к серверу. Проверьте интернет-соединение.")
+            else:
+                await safe_reply_text(update, "❌ Сервис временно недоступен")
+        except requests.exceptions.Timeout as e:
+            logger.exception("OpenRouter timeout in voice mode")
+            await safe_reply_text(update, "❌ Таймаут при обработке аудио. Попробуй ещё раз")
+        except Exception as e:
+            logger.exception("Unexpected error in voice mode")
+            await safe_reply_text(update, "❌ Не удалось распознать речь, попробуй ещё раз")
+            
+    except Exception as e:
+        logger.exception("Error downloading or processing voice message")
+        await safe_reply_text(update, "❌ Ошибка при обработке голосового сообщения. Попробуй ещё раз")
+    except Exception as e:
+        logger.exception(f"Error processing document {file_name}: {e}")
+        await safe_reply_text(update, f"❌ Ошибка при обработке файла {file_name}: {e}")
+
+
 # -------------------- PR REVIEW COMMAND --------------------
 
 async def review_pr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2145,6 +2262,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     temperature = get_temperature(context, chat_id)
     memory_enabled = get_memory_enabled(context, chat_id)
     model = get_model(context, chat_id) or None
+
+    # ---- VOICE MODE ----
+    if mode == "voice":
+        # Проверяем команды выхода из режима
+        text_lower = text.lower().strip()
+        if text_lower in ["/stop", "/cancel", "stop", "cancel", "выход", "отмена"]:
+            context.user_data["mode"] = "text"
+            await safe_reply_text(update, "✅ Режим голосового ассистента выключен")
+            return
+        await safe_reply_text(update, "Отправь голосовое сообщение 🎤")
+        return
 
     if mode == "tz":
         await handle_tz_message(update, context, text, temperature=temperature, model=model)
@@ -4183,19 +4311,43 @@ async def me_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{profile_info}\n\n"
         f"Теперь все ваши сообщения будут обрабатываться через персонального ассистента.\n"
         f"Для выхода из режима используйте /mode_text или другой режим.\n\n"
-        f"💡 Команды:\n"
-        f"• \"Обновить профиль [текст]\" - обновить информацию о себе\n"
-        f"• \"Кто я?\" - показать текущий профиль\n"
-        f"• Обычные сообщения - общение с персональным ассистентом"
+    )
+
+
+async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /voice - переключение в режим голосового ассистента"""
+    if not update.message:
+        return
+    
+    # Переключаем режим на "voice"
+    context.user_data["mode"] = "voice"
+    reset_tz(context)
+    reset_forest(context)
+    
+    await safe_reply_text(
+        update,
+        f"✅ Режим голосового ассистента включён 🎤\n"
+        f"Модель: {VOICE_MODEL}\n\n"
+        f"Отправь голосовое сообщение"
     )
 
 
 # -------------------- ERROR HANDLER --------------------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Unhandled error: %s", context.error)
+    error = context.error
+    error_type = type(error).__name__
+    error_msg = str(error)
+    
+    # Игнорируем ошибки подключения - они обычно временные
+    if "ConnectError" in error_type or "getaddrinfo failed" in error_msg or "11001" in error_msg:
+        logger.warning(f"Connection error (likely temporary): {error_type}: {error_msg}")
+        # Не показываем пользователю - это временная проблема сети
+        return
+    
+    logger.exception("Unhandled error: %s", error)
     if isinstance(update, Update) and update.message:
-        await safe_reply_text(update, f"Внутренняя ошибка: {type(context.error).__name__}: {context.error}")
+        await safe_reply_text(update, f"Внутренняя ошибка: {error_type}: {error_msg}")
 
 
 # -------------------- BOT COMMANDS MENU --------------------
@@ -4235,6 +4387,7 @@ async def post_init(app: Application) -> None:
         BotCommand("local_model", f"Режим локальной модели Ollama (переключение режима)"),
         BotCommand("analyze", "Анализ JSON логов через Ollama"),
         BotCommand("me", "Персональный ассистент"),
+        BotCommand("voice", "Голосовой ассистент"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4328,8 +4481,10 @@ def run() -> None:
     app.add_handler(CommandHandler("local_model", local_model_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
     app.add_handler(CommandHandler("me", me_cmd))
+    app.add_handler(CommandHandler("voice", voice_cmd))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)

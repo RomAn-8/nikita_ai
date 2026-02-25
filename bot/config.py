@@ -44,6 +44,21 @@ ME_MODEL = os.getenv("ME_MODEL", "").strip()
 if not ME_MODEL:
     ME_MODEL = OPENROUTER_MODEL  # Fallback на основную модель
 
+# Модель для голосового ассистента /voice (для ответа на вопросы)
+# По умолчанию используем OPENROUTER_MODEL, если VOICE_MODEL не указан
+VOICE_MODEL = os.getenv("VOICE_MODEL", "").strip()
+if not VOICE_MODEL:
+    VOICE_MODEL = OPENROUTER_MODEL  # Fallback на основную модель
+
+# Модель для распознавания речи через OpenRouter
+# По умолчанию используем VOICE_MODEL, если VOICE_WHISPER_MODEL не указан
+VOICE_WHISPER_MODEL = os.getenv("VOICE_WHISPER_MODEL", "").strip()
+if not VOICE_WHISPER_MODEL:
+    VOICE_WHISPER_MODEL = VOICE_MODEL  # Fallback на VOICE_MODEL
+
+# Системный промпт для голосового ассистента
+VOICE_SYSTEM_PROMPT = os.getenv("VOICE_SYSTEM_PROMPT", "Ты голосовой ассистент. Пользователь задал вопрос голосом. Ответь на вопрос кратко и точно на русском языке. Не повторяй вопрос пользователя в ответе.").strip()
+
 # Путь к файлу профиля пользователя
 USER_PROFILE_PATH = PROJECT_ROOT / "config" / "user_profile.json"
 
