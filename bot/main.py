@@ -15,8 +15,35 @@ from telegram.error import TimedOut, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.request import HTTPXRequest
 
-from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH, VOICE_MODEL, VOICE_SYSTEM_PROMPT
+from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH, VOICE_MODEL, VOICE_SYSTEM_PROMPT, MODEL_GLM, MODEL_GEMMA, PR_REVIEW_AVAILABLE
 from .openrouter import chat_completion, chat_completion_raw, transcribe_audio
+
+# NEW: God Agent architecture imports
+from .core.errors import safe_reply_text, handle_error
+from .core.context import AgentContext
+from .services.database import init_db, db_set_temperature, db_set_memory_enabled, db_set_model
+from .services.context_manager import get_mode, get_temperature, get_memory_enabled, get_model, get_effective_model
+from .services.memory import add_message, get_messages, clear_messages
+from .services.profile import load_user_profile, save_user_profile, build_me_system_prompt, update_profile_from_text
+from .utils.text import split_telegram_text, looks_like_json, is_forest_final, strip_forest_final_marker, _short_model_name
+
+# Import all handlers
+from .handlers.start import start
+from .handlers.help import help_cmd
+from .handlers.modes import mode_text_cmd, mode_json_cmd, mode_summary_cmd, thinking_model_cmd, expert_group_model_cmd
+from .handlers.settings import ch_temperature_cmd, ch_memory_cmd, clear_memory_cmd
+from .handlers.models import model_glm_cmd, model_gemma_cmd
+from .handlers.rag import embed_create_cmd, embed_docs_cmd, rag_model_cmd, clear_embeddings_cmd
+from .handlers.weather import weather_sub_cmd, weather_sub_stop_cmd
+from .handlers.digest import digest_cmd
+from .handlers.registration import register_cmd, unregister_cmd, train_signup_cmd, train_move_cmd, train_cancel_cmd, support_cmd
+from .handlers.tasks import task_list_cmd
+from .handlers.deployment import deploy_bot_cmd, stop_bot_cmd
+from .handlers.local import local_model_cmd, analyze_cmd
+from .handlers.personal import me_cmd
+from .handlers.voice import voice_cmd
+from .handlers.special import tz_creation_site_cmd, forest_split_cmd
+from .handlers.review import review_pr_cmd
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -36,7 +63,7 @@ from .mcp_client import (
 import sys
 from pathlib import Path
 REVIEW_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "review_pr.py"
-if REVIEW_SCRIPT_PATH.exists():
+if REVIEW_SCRIPT_PATH.exists() and PR_REVIEW_AVAILABLE:
     # Добавляем корень проекта в путь для импорта
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     if str(PROJECT_ROOT) not in sys.path:
@@ -48,12 +75,8 @@ if REVIEW_SCRIPT_PATH.exists():
             format_pr_files,
             create_review_prompt,
         )
-        PR_REVIEW_AVAILABLE = True
     except ImportError as e:
-        PR_REVIEW_AVAILABLE = False
         logger.warning(f"PR review functions not available: {e}")
-else:
-    PR_REVIEW_AVAILABLE = False
 from .weather_subscription import start_weather_subscription, stop_weather_subscription  # Подписка на погоду
 from .embeddings import process_readme_file, process_docs_folder, search_relevant_chunks, has_embeddings, list_indexed_documents, EMBEDDING_MODEL  # Модуль для работы с эмбеддингами
 
@@ -298,8 +321,7 @@ DEFAULT_MEMORY_ENABLED = True  # по умолчанию память включ
 # OPENROUTER_MODEL_GLM=z-ai/glm-4.7-flash
 # OPENROUTER_MODEL_GEMMA=google/gemma-3-12b-it
 
-MODEL_GLM = (os.getenv("OPENROUTER_MODEL_GLM") or "").strip()
-MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
+# MODEL_GLM and MODEL_GEMMA moved to config.py
 
 
 # -------------------- SQLITE MEMORY + SETTINGS --------------------
@@ -963,6 +985,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/support — поддержка с RAG (пример: /support можно перенести запись?)",
         "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
         "",
+        "🎤 Голосовой ассистент:",
+        "/voice — голосовой ассистент (отправьте голосовое сообщение для распознавания и ответа, для выхода: /stop или /cancel)",
+        "",
         "🤖 Локальные модели:",
         "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
         "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
@@ -970,6 +995,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "",
         "🚀 Деплой:",
         "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
+        "/stop_bot — остановить бота на сервере (опции: -v удалить данные, -i удалить образы)",
     ])
     
     if PR_REVIEW_AVAILABLE:
@@ -1054,10 +1080,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/train_cancel — отмена записи (пример: /train_cancel 1)",
             "/support — поддержка с RAG (пример: /support можно перенести запись?)",
             "/task_list — режим работы с задачами (словесные команды для создания, просмотра, удаления задач)",
+            "",
+            "🎤 Голосовой ассистент:",
+            "/voice — голосовой ассистент (отправьте голосовое сообщение для распознавания и ответа, для выхода: /stop или /cancel)",
+            "",
+            "🤖 Локальные модели:",
             "/local_model — режим локальной модели Ollama (переключение режима, затем просто пишите сообщения)",
             "/analyze — анализ JSON файлов с логами через Ollama (отправьте JSON файл, затем задайте вопрос)",
             "/me — персональный ассистент (использует профиль пользователя, команды: 'Обновить профиль', 'Кто я?')",
-            "/voice — голосовой ассистент (отправьте голосовое сообщение для распознавания и ответа, для выхода: /stop или /cancel)",
             "",
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
@@ -4388,6 +4418,8 @@ async def post_init(app: Application) -> None:
         BotCommand("analyze", "Анализ JSON логов через Ollama"),
         BotCommand("me", "Персональный ассистент"),
         BotCommand("voice", "Голосовой ассистент"),
+        BotCommand("deploy_bot", "Деплой бота на сервер"),
+        BotCommand("stop_bot", "Остановить бота на сервере"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4405,6 +4437,7 @@ def run() -> None:
     # Подавляем избыточные логи httpx (HTTP запросы к Telegram API)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     
+    # Use new database initialization
     init_db()
     # Инициализируем таблицу для эмбеддингов
     from .embeddings import init_embeddings_table
@@ -4434,7 +4467,8 @@ def run() -> None:
         "safe_reply_text": safe_reply_text,
     }
 
-    app.add_error_handler(error_handler)
+    # Use new error handler
+    app.add_error_handler(handle_error)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))

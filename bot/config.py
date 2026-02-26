@@ -62,6 +62,17 @@ VOICE_SYSTEM_PROMPT = os.getenv("VOICE_SYSTEM_PROMPT", "Ты голосовой 
 # Путь к файлу профиля пользователя
 USER_PROFILE_PATH = PROJECT_ROOT / "config" / "user_profile.json"
 
+# Альтернативные модели
+MODEL_GLM = (os.getenv("OPENROUTER_MODEL_GLM") or "").strip()
+MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
+
+# Проверка доступности review_pr
+try:
+    review_pr_path = PROJECT_ROOT / "scripts" / "review_pr.py"
+    PR_REVIEW_AVAILABLE = review_pr_path.exists()
+except Exception:
+    PR_REVIEW_AVAILABLE = False
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
 
