@@ -12,7 +12,7 @@ from pathlib import Path
 
 from telegram import Update, BotCommand
 from telegram.error import TimedOut, BadRequest
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.request import HTTPXRequest
 
 from .config import TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, RAG_SIM_THRESHOLD, RAG_TOP_K, EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_SYSTEM_PROMPT, ANALYZE_MODEL, ME_MODEL, USER_PROFILE_PATH, VOICE_MODEL, VOICE_SYSTEM_PROMPT, MODEL_GLM, MODEL_GEMMA, PR_REVIEW_AVAILABLE
@@ -44,6 +44,7 @@ from .handlers.personal import me_cmd
 from .handlers.voice import voice_cmd
 from .handlers.special import tz_creation_site_cmd, forest_split_cmd
 from .handlers.review import review_pr_cmd
+from .handlers.tictactoe import tictactoe_cmd, tictactoe_callback
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -996,11 +997,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚀 Деплой:",
         "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
         "/stop_bot — остановить бота на сервере (опции: -v удалить данные, -i удалить образы)",
+        "",
+        "🎮 Игры:",
+        "/tictactoe — крестики-нолики против ИИ (игра через inline-кнопки)",
     ])
-    
+
     if PR_REVIEW_AVAILABLE:
         lines.append("/review_pr — анализ Pull Request (пример: /review_pr 123)")
-    
+
     lines.extend([
         "",
         "📖 Справка:",
@@ -1092,6 +1096,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
             "/stop_bot — остановить бота на сервере (опции: -v удалить данные, -i удалить образы)",
+            "",
+            "🎮 Игры:",
+            "/tictactoe — крестики-нолики против ИИ (игра через inline-кнопки)",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -4420,6 +4427,7 @@ async def post_init(app: Application) -> None:
         BotCommand("voice", "Голосовой ассистент"),
         BotCommand("deploy_bot", "Деплой бота на сервер"),
         BotCommand("stop_bot", "Остановить бота на сервере"),
+        BotCommand("tictactoe", "Крестики-нолики против ИИ"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4516,7 +4524,9 @@ def run() -> None:
     app.add_handler(CommandHandler("analyze", analyze_cmd))
     app.add_handler(CommandHandler("me", me_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
+    app.add_handler(CommandHandler("tictactoe", tictactoe_cmd))
 
+    app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

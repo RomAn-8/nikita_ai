@@ -94,8 +94,11 @@ class StartHandler(Handler):
             "🚀 Деплой:",
             "/deploy_bot — деплой бота на сервер (требует настройки переменных окружения)",
             "/stop_bot — остановить бота на сервере (опции: -v удалить данные, -i удалить образы)",
+            "",
+            "🎮 Игры:",
+            "/tictactoe — крестики-нолики против ИИ (игра через inline-кнопки)",
         ])
-        
+
         if PR_REVIEW_AVAILABLE:
             lines.append("/review_pr — анализ Pull Request (пример: /review_pr 123)")
         
