@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile bot/services/tictactoe.py)",
+      "Bash(python -m py_compile bot/handlers/tictactoe.py)"
+    ]
+  }
+}
