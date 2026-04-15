@@ -54,6 +54,8 @@ class TicTacToe:
 
         # AI move
         ai_pos = self._find_best_move()
+        if self.board[ai_pos] != self.EMPTY:
+            raise RuntimeError(f"AI move validation failed: position {ai_pos} is not empty")
         self.board[ai_pos] = self.AI
 
         # Check if AI won
@@ -126,7 +128,9 @@ class TicTacToe:
                     best_score = score
                     best_move = i
 
-        return best_move if best_move is not None else 0
+        if best_move is None:
+            raise RuntimeError("No empty cells available for AI move")
+        return best_move
 
     def _minimax(self, depth: int, is_maximizing: bool) -> int:
         """Minimax algorithm for AI decision."""
