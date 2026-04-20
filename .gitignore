@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 bot/bot_memory.sqlite3
 bot/bot_memory.sqlite3-*
+*.tar
+.opencode/node_modules/
+.claude/settings.local.json
+.claude/Untitled

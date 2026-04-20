@@ -1,0 +1,32 @@
+{
+    "$schema": "https://opencode.ai/config.json",
+    "agent": {
+      "nikita-build": {
+        "description": "Агент для проекта nikita_ai: анализ кода, правки файлов, добавление команд, работа по правилам AGENTS.md",
+        "mode": "primary",
+        "model": "ollama/qwen2.5-coder:3b",
+        "temperature": 0.1,
+        "permission": {
+          "bash": {
+            "uv *": "allow",
+            "python *": "allow",
+            "git status*": "allow",
+            "git diff*": "allow",
+            "git log*": "allow",
+            "ls *": "allow",
+            "find *": "allow",
+            "grep *": "allow",
+            "cat *": "allow",
+            "git push*": "ask",
+            "rm *": "ask",
+            "*": "ask"
+          },
+          "edit": "allow",
+          "read": "allow",
+          "list": "allow",
+          "grep": "allow",
+          "glob": "allow"
+        }
+      }
+    }
+  }
