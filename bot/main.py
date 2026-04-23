@@ -45,6 +45,8 @@ from .handlers.voice import voice_cmd
 from .handlers.special import tz_creation_site_cmd, forest_split_cmd
 from .handlers.review import review_pr_cmd
 from .handlers.tictactoe import tictactoe_cmd, tictactoe_callback
+from .handlers.finetune import ft_status_cmd, ft_validate_cmd, ft_baseline_cmd, ft_dryrun_cmd
+from .handlers.inference_quality import iq_post_cmd, iq_redundancy_cmd, iq_eval_cmd, iq_stats_cmd
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1003,9 +1005,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ])
 
     if PR_REVIEW_AVAILABLE:
-        lines.append("/review_pr — анализ Pull Request (пример: /review_pr 123)")
+        lines.extend([
+            "",
+            "🔍 Анализ кода:",
+            "/review_pr — анализ Pull Request (пример: /review_pr 123)",
+        ])
 
     lines.extend([
+        "",
+        "🧬 Fine-tuning:",
+        "/ft_status — состояние датасета fine-tuning (строк, размер)",
+        "/ft_validate — валидация train.jsonl и eval.jsonl",
+        "/ft_baseline — статистика baseline результатов",
+        "/ft_dryrun — dry-run параметров fine-tuning pipeline",
+        "",
+        "🎯 Контроль качества инференса:",
+        "/iq_post — VK-анонс с constraint-check + self-check + scoring",
+        "/iq_redundancy — 3 прогона + LLM-судья: сравнение по смыслу",
+        "/iq_eval — оценка baseline Дня 6 через constraint-check",
+        "/iq_stats — статистика отклонённых и повторных inference",
         "",
         "📖 Справка:",
         "/help — показать список команд или ответить на вопрос о проекте",
@@ -1099,13 +1117,32 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "🎮 Игры:",
             "/tictactoe — крестики-нолики против ИИ (игра через inline-кнопки)",
-            "",
-            "📖 Справка:",
-            "/help <вопрос> — ответить на вопрос о проекте используя RAG",
     ]
 
         if PR_REVIEW_AVAILABLE:
-            lines.insert(-2, "/review_pr — анализ Pull Request (пример: /review_pr 123)")
+            lines.extend([
+                "",
+                "🔍 Анализ кода:",
+                "/review_pr — анализ Pull Request (пример: /review_pr 123)",
+            ])
+
+        lines.extend([
+            "",
+            "🧬 Fine-tuning:",
+            "/ft_status — состояние датасета fine-tuning (строк, размер)",
+            "/ft_validate — валидация train.jsonl и eval.jsonl",
+            "/ft_baseline — статистика baseline результатов",
+            "/ft_dryrun — dry-run параметров fine-tuning pipeline",
+            "",
+            "🎯 Контроль качества инференса:",
+            "/iq_post — VK-анонс с constraint-check + self-check + scoring",
+            "/iq_redundancy — 3 прогона + LLM-судья: сравнение по смыслу",
+            "/iq_eval — оценка baseline Дня 6 через constraint-check",
+            "/iq_stats — статистика отклонённых и повторных inference",
+            "",
+            "📖 Справка:",
+            "/help <вопрос> — ответить на вопрос о проекте используя RAG",
+        ])
 
         if MODEL_GLM:
             lines.insert(4, f"/model_glm — модель {_short_model_name(MODEL_GLM)}")
@@ -4428,6 +4465,14 @@ async def post_init(app: Application) -> None:
         BotCommand("deploy_bot", "Деплой бота на сервер"),
         BotCommand("stop_bot", "Остановить бота на сервере"),
         BotCommand("tictactoe", "Крестики-нолики против ИИ"),
+        BotCommand("ft_status", "Состояние датасета fine-tuning"),
+        BotCommand("ft_validate", "Валидация датасета fine-tuning"),
+        BotCommand("ft_baseline", "Статистика baseline результатов"),
+        BotCommand("ft_dryrun", "Dry-run параметров fine-tuning pipeline"),
+        BotCommand("iq_post", "VK-анонс с контролем quality (constraint + self-check)"),
+        BotCommand("iq_redundancy", "3 прогона + LLM-судья: сравнение по смыслу"),
+        BotCommand("iq_eval", "Оценка baseline Дня 6 через constraint-check"),
+        BotCommand("iq_stats", "Статистика inference quality текущей сессии"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4525,6 +4570,14 @@ def run() -> None:
     app.add_handler(CommandHandler("me", me_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("tictactoe", tictactoe_cmd))
+    app.add_handler(CommandHandler("ft_status", ft_status_cmd))
+    app.add_handler(CommandHandler("ft_validate", ft_validate_cmd))
+    app.add_handler(CommandHandler("ft_baseline", ft_baseline_cmd))
+    app.add_handler(CommandHandler("ft_dryrun", ft_dryrun_cmd))
+    app.add_handler(CommandHandler("iq_post", iq_post_cmd))
+    app.add_handler(CommandHandler("iq_redundancy", iq_redundancy_cmd))
+    app.add_handler(CommandHandler("iq_eval", iq_eval_cmd))
+    app.add_handler(CommandHandler("iq_stats", iq_stats_cmd))
 
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))

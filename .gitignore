@@ -11,3 +11,5 @@ bot/bot_memory.sqlite3-*
 .opencode/node_modules/
 .claude/settings.local.json
 .claude/Untitled
+finetune/data/*.jsonl
+finetune/data/raw/

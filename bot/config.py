@@ -66,6 +66,17 @@ USER_PROFILE_PATH = PROJECT_ROOT / "config" / "user_profile.json"
 MODEL_GLM = (os.getenv("OPENROUTER_MODEL_GLM") or "").strip()
 MODEL_GEMMA = (os.getenv("OPENROUTER_MODEL_GEMMA") or "").strip()
 
+# Fine-tuning pipeline (прямой OpenAI API, отдельно от OpenRouter)
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "").strip()
+FT_BASE_MODEL    = os.getenv("FT_BASE_MODEL", "gpt-4o-mini-2024-07-18").strip()
+FT_DATA_PATH     = Path(os.getenv("FT_DATA_PATH", "")).resolve() if os.getenv("FT_DATA_PATH") else PROJECT_ROOT / "finetune" / "data"
+FT_POLL_INTERVAL = int(os.getenv("FT_POLL_INTERVAL", "30"))
+
+# Inference Quality Control (День 7)
+IQ_MAX_RETRIES          = int(os.getenv("IQ_MAX_RETRIES", "2"))
+IQ_CONFIDENCE_THRESHOLD = float(os.getenv("IQ_CONFIDENCE_THRESHOLD", "0.6"))
+IQ_REDUNDANCY_N         = int(os.getenv("IQ_REDUNDANCY_N", "3"))
+
 # Проверка доступности review_pr
 try:
     review_pr_path = PROJECT_ROOT / "scripts" / "review_pr.py"
