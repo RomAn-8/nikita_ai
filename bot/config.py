@@ -77,6 +77,11 @@ IQ_MAX_RETRIES          = int(os.getenv("IQ_MAX_RETRIES", "2"))
 IQ_CONFIDENCE_THRESHOLD = float(os.getenv("IQ_CONFIDENCE_THRESHOLD", "0.6"))
 IQ_REDUNDANCY_N         = int(os.getenv("IQ_REDUNDANCY_N", "3"))
 
+# Routing между моделями (День 8)
+ROUTING_SMALL_MODEL          = os.getenv("ROUTING_SMALL_MODEL", "openai/gpt-4o-mini").strip()
+ROUTING_LARGE_MODEL          = os.getenv("ROUTING_LARGE_MODEL", "openai/gpt-5.2").strip()
+ROUTING_CONFIDENCE_THRESHOLD = float(os.getenv("ROUTING_CONFIDENCE_THRESHOLD", "0.7"))
+
 # Проверка доступности review_pr
 try:
     review_pr_path = PROJECT_ROOT / "scripts" / "review_pr.py"

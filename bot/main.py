@@ -46,7 +46,7 @@ from .handlers.special import tz_creation_site_cmd, forest_split_cmd
 from .handlers.review import review_pr_cmd
 from .handlers.tictactoe import tictactoe_cmd, tictactoe_callback
 from .handlers.finetune import ft_status_cmd, ft_validate_cmd, ft_baseline_cmd, ft_dryrun_cmd
-from .handlers.inference_quality import iq_post_cmd, iq_redundancy_cmd, iq_eval_cmd, iq_stats_cmd
+from .handlers.inference_quality import iq_post_cmd, iq_redundancy_cmd, iq_eval_cmd, iq_stats_cmd, iq_post_routing_cmd
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1025,6 +1025,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/iq_eval — оценка baseline Дня 6 через constraint-check",
         "/iq_stats — статистика отклонённых и повторных inference",
         "",
+        "🔀 Routing между моделями:",
+        "/iq_post_routing — анонс через малую модель + эскалация на сильную",
+        "",
         "📖 Справка:",
         "/help — показать список команд или ответить на вопрос о проекте",
     ])
@@ -1139,6 +1142,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/iq_redundancy — 3 прогона + LLM-судья: сравнение по смыслу",
             "/iq_eval — оценка baseline Дня 6 через constraint-check",
             "/iq_stats — статистика отклонённых и повторных inference",
+            "",
+            "🔀 Routing между моделями:",
+            "/iq_post_routing — анонс через малую модель + эскалация на сильную",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -4473,6 +4479,7 @@ async def post_init(app: Application) -> None:
         BotCommand("iq_redundancy", "3 прогона + LLM-судья: сравнение по смыслу"),
         BotCommand("iq_eval", "Оценка baseline Дня 6 через constraint-check"),
         BotCommand("iq_stats", "Статистика inference quality текущей сессии"),
+        BotCommand("iq_post_routing", "Малая модель → эскалация на сильную при UNSURE/FAIL"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4578,6 +4585,7 @@ def run() -> None:
     app.add_handler(CommandHandler("iq_redundancy", iq_redundancy_cmd))
     app.add_handler(CommandHandler("iq_eval", iq_eval_cmd))
     app.add_handler(CommandHandler("iq_stats", iq_stats_cmd))
+    app.add_handler(CommandHandler("iq_post_routing", iq_post_routing_cmd))
 
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))

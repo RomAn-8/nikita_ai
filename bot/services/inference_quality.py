@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from statistics import mean, stdev
 
 from .llm import call_llm, call_llm_raw
-from ..config import IQ_MAX_RETRIES, IQ_CONFIDENCE_THRESHOLD, IQ_REDUNDANCY_N, FT_DATA_PATH
+from ..config import (
+    IQ_MAX_RETRIES, IQ_CONFIDENCE_THRESHOLD, IQ_REDUNDANCY_N, FT_DATA_PATH,
+    ROUTING_SMALL_MODEL, ROUTING_LARGE_MODEL, ROUTING_CONFIDENCE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,15 @@ _session_stats: dict = {
     "latencies_ms": [],
 }
 
+# Статистика routing-сессии (День 8)
+_routing_stats: dict = {
+    "total": 0,
+    "small_only": 0,
+    "escalated": 0,
+    "total_tokens": 0,
+    "latencies_ms": [],
+}
+
 
 @dataclass
 class InferenceResult:
@@ -64,6 +76,17 @@ class InferenceResult:
     retries: int = 0
     tokens_used: int = 0
     latency_ms: int = 0
+
+
+@dataclass
+class RoutingResult:
+    small_result: InferenceResult
+    escalated: bool
+    escalation_reason: str             # "" если эскалации не было
+    large_result: "InferenceResult | None"
+    final_result: InferenceResult      # ссылка на small или large
+    total_latency_ms: int
+    total_tokens: int
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +248,7 @@ def _compute_status(constraint: dict, sc: dict) -> tuple[str, float]:
 def generate_with_confidence(
     user_prompt: str,
     max_retries: int = IQ_MAX_RETRIES,
+    model: str | None = None,
 ) -> InferenceResult:
     """Генерирует VK-анонс с контролем quality. Constraint-based + self-check + scoring."""
     t_start = time.perf_counter()
@@ -239,7 +263,7 @@ def generate_with_confidence(
 
     while attempt <= max_retries:
         try:
-            raw = call_llm_raw(messages, temperature=0.7)
+            raw = call_llm_raw(messages, temperature=0.7, model=model)
             if not raw:
                 attempt += 1
                 continue
@@ -255,7 +279,7 @@ def generate_with_confidence(
                 attempt += 1
                 continue
 
-            sc = self_check(VK_SYSTEM_PROMPT, user_prompt, text)
+            sc = self_check(VK_SYSTEM_PROMPT, user_prompt, text, model=model)
             total_tokens += raw.get("usage", {}).get("completion_tokens", 0)  # approx
 
             status, confidence = _compute_status(constraint, sc)
@@ -439,3 +463,72 @@ def _update_stats(result: InferenceResult) -> None:
         _session_stats["retried"] += result.retries
     _session_stats["total_tokens"] += result.tokens_used
     _session_stats["latencies_ms"].append(result.latency_ms)
+
+
+# ---------------------------------------------------------------------------
+# Routing между моделями (День 8)
+# ---------------------------------------------------------------------------
+
+def _should_escalate(result: InferenceResult, threshold: float) -> tuple[bool, str]:
+    """Определяет, нужна ли эскалация на более сильную модель."""
+    if result.status == "FAIL":
+        return True, "status=FAIL"
+    if result.status == "UNSURE":
+        return True, "status=UNSURE"
+    if result.confidence < threshold:
+        return True, f"confidence {result.confidence:.2f} < {threshold}"
+    return False, ""
+
+
+def route_and_generate(
+    user_prompt: str,
+    small_model: str = ROUTING_SMALL_MODEL,
+    large_model: str = ROUTING_LARGE_MODEL,
+    confidence_threshold: float = ROUTING_CONFIDENCE_THRESHOLD,
+    max_retries: int = IQ_MAX_RETRIES,
+) -> RoutingResult:
+    """Сначала малая модель, при UNSURE/FAIL/низкой confidence — эскалация на большую."""
+    t_start = time.perf_counter()
+
+    small_result = generate_with_confidence(user_prompt, max_retries=max_retries, model=small_model)
+    escalate, reason = _should_escalate(small_result, confidence_threshold)
+
+    large_result: InferenceResult | None = None
+    if escalate:
+        large_result = generate_with_confidence(user_prompt, max_retries=max_retries, model=large_model)
+
+    final_result = large_result if large_result is not None else small_result
+    total_latency = int((time.perf_counter() - t_start) * 1000)
+    total_tokens = small_result.tokens_used + (large_result.tokens_used if large_result else 0)
+
+    _routing_stats["total"] += 1
+    if escalate:
+        _routing_stats["escalated"] += 1
+    else:
+        _routing_stats["small_only"] += 1
+    _routing_stats["total_tokens"] += total_tokens
+    _routing_stats["latencies_ms"].append(total_latency)
+
+    return RoutingResult(
+        small_result=small_result,
+        escalated=escalate,
+        escalation_reason=reason,
+        large_result=large_result,
+        final_result=final_result,
+        total_latency_ms=total_latency,
+        total_tokens=total_tokens,
+    )
+
+
+def get_routing_stats() -> dict:
+    """Возвращает статистику routing-сессии."""
+    total = _routing_stats["total"]
+    latencies = _routing_stats["latencies_ms"]
+    avg_latency = round(sum(latencies) / len(latencies)) if latencies else 0
+    return {
+        "total": total,
+        "small_only": _routing_stats["small_only"],
+        "escalated": _routing_stats["escalated"],
+        "total_tokens": _routing_stats["total_tokens"],
+        "avg_latency_ms": avg_latency,
+    }

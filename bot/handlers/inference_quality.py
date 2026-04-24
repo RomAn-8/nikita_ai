@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from ..core.errors import safe_reply_text
+from ..config import ROUTING_SMALL_MODEL, ROUTING_LARGE_MODEL, ROUTING_CONFIDENCE_THRESHOLD
 from ..services import inference_quality as iq
 
 logger = logging.getLogger(__name__)
@@ -182,5 +183,87 @@ async def iq_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"  Повторных inference: {stats['retried']}",
         f"  Токены: ~{stats['total_tokens']}  |  Среднее время: {stats['avg_latency_ms']} мс",
     ]
+
+    await safe_reply_text(update, "\n".join(lines))
+
+
+async def iq_post_routing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/iq_post_routing <описание главы> — малая модель + эскалация на сильную при UNSURE/FAIL."""
+    if not update.message:
+        return
+
+    user_prompt = " ".join(context.args) if context.args else ""
+    if not user_prompt.strip():
+        await safe_reply_text(
+            update,
+            "Укажи описание главы.\nПример: /iq_post_routing Глава 5: Арморн обнаружил залежи руды в шахте.",
+        )
+        return
+
+    await update.message.chat.send_action("typing")
+
+    try:
+        result = iq.route_and_generate(user_prompt)
+    except Exception as e:
+        logger.exception("iq_post_routing_cmd error: %s", e)
+        await safe_reply_text(update, "Ошибка при routing. Попробуйте позже.")
+        return
+
+    small = result.small_result
+    final = result.final_result
+
+    small_model_short = ROUTING_SMALL_MODEL.split("/")[-1]
+    large_model_short = ROUTING_LARGE_MODEL.split("/")[-1]
+
+    if result.escalated:
+        header = f"🤖 Routing: {small_model_short} → {large_model_short} (эскалация)"
+    else:
+        header = f"🤖 Routing: {small_model_short}"
+
+    lines = [header, ""]
+
+    if result.escalated:
+        small_sc = small.checks.get("self_check", {})
+        small_constraint = small.checks.get("constraint", {})
+        small_status_icon = {"OK": "✅", "UNSURE": "⚠️", "FAIL": "❌"}.get(small.status, "❓")
+        small_sc_issues = small_sc.get("issues", [])
+        small_sc_line = "без спойлеров, стиль ✓" if small_sc.get("verdict") == "OK" else (", ".join(small_sc_issues) if small_sc_issues else small_sc.get("verdict", "—"))
+        small_link_icon = "✓" if small_constraint.get("has_link") else "✗"
+
+        lines.append(f"📋 {small_model_short}: {small_status_icon} {small.status}  |  Уверенность: {small.confidence:.2f}")
+        lines.append(f"📏 Длина: {small_constraint.get('body_length', '—')} симв.  |  Ссылка: {small_link_icon}")
+        lines.append(f"🔍 Self-check: {small_sc_line}")
+        lines.append(f"❓ Причина эскалации: {result.escalation_reason}")
+        lines.append("")
+
+    sc = final.checks.get("self_check", {})
+    constraint = final.checks.get("constraint", {})
+    status_icon = {"OK": "✅", "UNSURE": "⚠️", "FAIL": "❌"}.get(final.status, "❓")
+    link_icon = "✓" if constraint.get("has_link") else "✗"
+    sc_issues = sc.get("issues", [])
+    sc_line = "без спойлеров, стиль ✓" if sc.get("verdict") == "OK" else (", ".join(sc_issues) if sc_issues else sc.get("verdict", "—"))
+
+    model_label = large_model_short if result.escalated else small_model_short
+
+    if final.status != "FAIL" and final.text:
+        lines.append(f"📝 VK-анонс ({model_label}):")
+        lines.append(final.text)
+        lines.append("")
+
+    lines.append(f"{status_icon} Статус: {final.status}  |  Уверенность: {final.confidence:.2f}")
+    lines.append(f"📏 Длина: {constraint.get('body_length', '—')} симв.  |  Ссылка: {link_icon}")
+    lines.append(f"🔍 Self-check: {sc_line}")
+
+    if result.escalated:
+        lines.append(f"💡 Решение: эскалация → {large_model_short}")
+    else:
+        lines.append(f"💡 Решение: малая модель справилась")
+
+    lines.append(f"⏱ {result.total_latency_ms / 1000:.1f} сек  |  токены: ~{result.total_tokens}")
+
+    if final.status == "FAIL":
+        issues = constraint.get("issues", [])
+        if issues:
+            lines.append("⚠️ Проблемы: " + "; ".join(issues))
 
     await safe_reply_text(update, "\n".join(lines))
