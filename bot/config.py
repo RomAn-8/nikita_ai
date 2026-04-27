@@ -82,6 +82,10 @@ ROUTING_SMALL_MODEL          = os.getenv("ROUTING_SMALL_MODEL", "openai/gpt-4o-m
 ROUTING_LARGE_MODEL          = os.getenv("ROUTING_LARGE_MODEL", "openai/gpt-5.2").strip()
 ROUTING_CONFIDENCE_THRESHOLD = float(os.getenv("ROUTING_CONFIDENCE_THRESHOLD", "0.7"))
 
+# Micro-model first (День 10): порог уверенности классификатора
+# micro = ROUTING_SMALL_MODEL, fallback = ROUTING_LARGE_MODEL
+MICRO_CONFIDENCE_THRESHOLD = float(os.getenv("MICRO_CONFIDENCE_THRESHOLD", "0.75"))
+
 # Проверка доступности review_pr
 try:
     review_pr_path = PROJECT_ROOT / "scripts" / "review_pr.py"

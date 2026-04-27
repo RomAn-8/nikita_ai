@@ -48,6 +48,7 @@ from .handlers.tictactoe import tictactoe_cmd, tictactoe_callback
 from .handlers.finetune import ft_status_cmd, ft_validate_cmd, ft_baseline_cmd, ft_dryrun_cmd
 from .handlers.inference_quality import iq_post_cmd, iq_redundancy_cmd, iq_eval_cmd, iq_stats_cmd, iq_post_routing_cmd
 from .handlers.multistage import iq_post_monolithic_cmd, iq_post_multistage_cmd, iq_post_compare_cmd
+from .handlers.micro_first import iq_post_micro_cmd, iq_micro_stats_cmd
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1034,6 +1035,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/iq_post_multistage — 3-этапная генерация: анализ → стратегия → пост",
         "/iq_post_compare — сравнение monolithic vs multi-stage",
         "",
+        "🔬 Micro-model first:",
+        "/iq_post_micro — micro-model решает стратегию, fallback на большую если UNSURE",
+        "/iq_micro_stats — статистика: micro vs fallback, latency",
+        "",
         "📖 Справка:",
         "/help — показать список команд или ответить на вопрос о проекте",
     ])
@@ -1156,6 +1161,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/iq_post_monolithic — один большой запрос, один готовый пост",
             "/iq_post_multistage — 3-этапная генерация: анализ → стратегия → пост",
             "/iq_post_compare — сравнение monolithic vs multi-stage",
+            "",
+            "🔬 Micro-model first:",
+            "/iq_post_micro — micro-model решает стратегию, fallback на большую если UNSURE",
+            "/iq_micro_stats — статистика: micro vs fallback, latency",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -4494,6 +4503,8 @@ async def post_init(app: Application) -> None:
         BotCommand("iq_post_monolithic", "Один запрос → готовый VK-анонс (monolithic)"),
         BotCommand("iq_post_multistage", "3 этапа: анализ → стратегия → пост"),
         BotCommand("iq_post_compare", "Сравнение monolithic vs multi-stage"),
+        BotCommand("iq_post_micro", "Micro-model классифицирует вход и выбирает стратегию"),
+        BotCommand("iq_micro_stats", "Статистика micro-model: micro vs fallback, latency"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4603,6 +4614,8 @@ def run() -> None:
     app.add_handler(CommandHandler("iq_post_monolithic", iq_post_monolithic_cmd))
     app.add_handler(CommandHandler("iq_post_multistage", iq_post_multistage_cmd))
     app.add_handler(CommandHandler("iq_post_compare", iq_post_compare_cmd))
+    app.add_handler(CommandHandler("iq_post_micro", iq_post_micro_cmd))
+    app.add_handler(CommandHandler("iq_micro_stats", iq_micro_stats_cmd))
 
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
