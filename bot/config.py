@@ -86,6 +86,21 @@ ROUTING_CONFIDENCE_THRESHOLD = float(os.getenv("ROUTING_CONFIDENCE_THRESHOLD", "
 # micro = ROUTING_SMALL_MODEL, fallback = ROUTING_LARGE_MODEL
 MICRO_CONFIDENCE_THRESHOLD = float(os.getenv("MICRO_CONFIDENCE_THRESHOLD", "0.75"))
 
+# LLM Gateway (День 13)
+GW_RATE_LIMIT  = int(os.getenv("GW_RATE_LIMIT", "5"))    # max requests per window
+GW_RATE_WINDOW = int(os.getenv("GW_RATE_WINDOW", "60"))  # window size in seconds
+
+# Стоимость токенов по моделям (USD за 1M токенов, приблизительно)
+MODEL_PRICES: dict[str, dict[str, float]] = {
+    "openai/gpt-4o-mini":             {"input": 0.15,  "output": 0.60},
+    "openai/gpt-4o":                  {"input": 5.00,  "output": 15.00},
+    "anthropic/claude-3-haiku":       {"input": 0.25,  "output": 1.25},
+    "anthropic/claude-3-5-sonnet":    {"input": 3.00,  "output": 15.00},
+    "anthropic/claude-3-7-sonnet":    {"input": 3.00,  "output": 15.00},
+    "google/gemini-flash-1.5":        {"input": 0.075, "output": 0.30},
+}
+MODEL_PRICE_DEFAULT: dict[str, float] = {"input": 0.50, "output": 1.50}
+
 # Проверка доступности review_pr
 try:
     review_pr_path = PROJECT_ROOT / "scripts" / "review_pr.py"

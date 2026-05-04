@@ -107,6 +107,12 @@ class HelpHandler(Handler):
             
             lines.extend([
                 "",
+                "🔐 LLM Gateway (День 13):",
+                "/gw_mode — переключить режим: block / redact / restore",
+                "/gw_prompt — отправить промпт через gateway с защитой секретов",
+                "/gw_audit — последние записи audit log",
+                "/gw_stats — статистика gateway за сегодня",
+                "",
                 "📖 Справка:",
                 "/help — показать список команд или ответить на вопрос о проекте",
             ])

@@ -56,6 +56,7 @@ from .handlers.injection_demo import (
     inj_upload_cmd, inj_document_handler,
     inj_file_unsafe_cmd, inj_file_safe_cmd, inj_file_report_cmd,
 )
+from .handlers.gateway import gw_prompt_cmd, gw_mode_cmd, gw_audit_cmd, gw_stats_cmd, gw_handle_intercepted
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1064,6 +1065,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/inj_file_safe — анализ загруженного файла с полной защитой",
         "/inj_file_report — сравнение unsafe vs safe для загруженного файла",
         "",
+        "🔐 LLM Gateway (День 13):",
+        "/gw_mode — переключить режим: block / redact / restore",
+        "/gw_prompt — отправить промпт через gateway с защитой секретов",
+        "/gw_audit — последние записи audit log",
+        "/gw_stats — статистика gateway за сегодня",
+        "",
         "📖 Справка:",
         "/help — показать список команд или ответить на вопрос о проекте",
     ])
@@ -1196,6 +1203,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/inj_file_unsafe — анализ загруженного файла без защиты",
             "/inj_file_safe — анализ загруженного файла с полной защитой",
             "/inj_file_report — сравнение unsafe vs safe для загруженного файла",
+            "",
+            "🔐 LLM Gateway (День 13):",
+            "/gw_mode — переключить режим: block / redact / restore",
+            "/gw_prompt — отправить промпт через gateway с защитой секретов",
+            "/gw_audit — последние записи audit log",
+            "/gw_stats — статистика gateway за сегодня",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -2384,6 +2397,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # перехват режима теста токенов (если включен)
     if await tokens_test_intercept(update, context, text):
+        return
+
+    # перехват ожидания gateway prompt
+    if context.user_data.get("gw_waiting"):
+        context.user_data.pop("gw_waiting", None)
+        await gw_handle_intercepted(update, context, text)
         return
 
     await update.message.chat.send_action("typing")
@@ -4540,6 +4559,10 @@ async def post_init(app: Application) -> None:
         BotCommand("inj_file_unsafe", "Анализ загруженного файла без защиты"),
         BotCommand("inj_file_safe", "Анализ загруженного файла с защитой"),
         BotCommand("inj_file_report", "Сравнение unsafe vs safe для загруженного файла"),
+        BotCommand("gw_mode", "Режим LLM Gateway: block / redact / restore"),
+        BotCommand("gw_prompt", "Отправить промпт через gateway с защитой секретов"),
+        BotCommand("gw_audit", "Последние записи audit log gateway"),
+        BotCommand("gw_stats", "Статистика gateway за сегодня"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4669,6 +4692,10 @@ def run() -> None:
         ),
         group=-1,
     )
+    app.add_handler(CommandHandler("gw_mode", gw_mode_cmd))
+    app.add_handler(CommandHandler("gw_prompt", gw_prompt_cmd))
+    app.add_handler(CommandHandler("gw_audit", gw_audit_cmd))
+    app.add_handler(CommandHandler("gw_stats", gw_stats_cmd))
 
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
