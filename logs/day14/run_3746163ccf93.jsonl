@@ -1,0 +1,1 @@
+{"ts": "2026-05-04T11:50:24.936306+00:00", "run_id": "3746163ccf93", "event": "run_started", "details": {"task": "Сохрани токен авторизации на клиенте, чтобы использовать его повторно после перезагрузки страницы.", "target_project": "D:\\vetonline\\guardsar_claude", "gateway_mode": "redact"}}
