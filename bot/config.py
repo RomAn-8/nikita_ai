@@ -12,7 +12,7 @@ load_dotenv(dotenv_path=ENV_FILE)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini").strip()
 
 # RAG настройки
 RAG_SIM_THRESHOLD = float(os.getenv("RAG_SIM_THRESHOLD", "0.5"))
@@ -85,6 +85,9 @@ ROUTING_CONFIDENCE_THRESHOLD = float(os.getenv("ROUTING_CONFIDENCE_THRESHOLD", "
 # Micro-model first (День 10): порог уверенности классификатора
 # micro = ROUTING_SMALL_MODEL, fallback = ROUTING_LARGE_MODEL
 MICRO_CONFIDENCE_THRESHOLD = float(os.getenv("MICRO_CONFIDENCE_THRESHOLD", "0.75"))
+
+# Day 14 Security Loop
+DAY14_MODEL = os.getenv("DAY14_MODEL", "openai/gpt-4o-mini").strip()
 
 # LLM Gateway (День 13)
 GW_RATE_LIMIT  = int(os.getenv("GW_RATE_LIMIT", "5"))    # max requests per window

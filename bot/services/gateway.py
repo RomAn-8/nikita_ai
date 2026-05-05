@@ -87,6 +87,7 @@ def run_gateway(
     mode: str,
     user_id: int,
     user_data: dict,
+    model: str | None = None,
 ) -> GatewayResult:
     """Основной entry point Gateway.
 
@@ -178,7 +179,7 @@ def run_gateway(
     response_text = ""
 
     try:
-        raw = call_llm_raw(messages, temperature=0.3)
+        raw = call_llm_raw(messages, temperature=0.3, model=model)
         if raw:
             choices = raw.get("choices", [])
             if choices:

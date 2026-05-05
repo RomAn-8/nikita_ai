@@ -57,6 +57,7 @@ from .handlers.injection_demo import (
     inj_file_unsafe_cmd, inj_file_safe_cmd, inj_file_report_cmd,
 )
 from .handlers.gateway import gw_prompt_cmd, gw_mode_cmd, gw_audit_cmd, gw_stats_cmd, gw_handle_intercepted
+from .handlers.day14_security import sec14_run_cmd, sec14_status_cmd, sec14_report_cmd
 from .tokens_test import tokens_test_cmd, tokens_next_cmd, tokens_stop_cmd, tokens_test_intercept
 
 # NEW: summary-mode
@@ -1071,6 +1072,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/gw_audit — последние записи audit log",
         "/gw_stats — статистика gateway за сегодня",
         "",
+        "🔒 Security step:",
+        "/sec14_run — security loop: generation → build/test → security review",
+        "/sec14_status — статус последнего/текущего прогона",
+        "/sec14_report — краткий отчёт: gateway, security review, warnings",
+        "",
         "📖 Справка:",
         "/help — показать список команд или ответить на вопрос о проекте",
     ])
@@ -1209,6 +1215,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/gw_prompt — отправить промпт через gateway с защитой секретов",
             "/gw_audit — последние записи audit log",
             "/gw_stats — статистика gateway за сегодня",
+            "",
+            "🔒 Security step:",
+            "/sec14_run — security loop: generation → build/test → security review",
+            "/sec14_status — статус последнего/текущего прогона",
+            "/sec14_report — краткий отчёт: gateway, security review, warnings",
             "",
             "📖 Справка:",
             "/help <вопрос> — ответить на вопрос о проекте используя RAG",
@@ -4563,6 +4574,9 @@ async def post_init(app: Application) -> None:
         BotCommand("gw_prompt", "Отправить промпт через gateway с защитой секретов"),
         BotCommand("gw_audit", "Последние записи audit log gateway"),
         BotCommand("gw_stats", "Статистика gateway за сегодня"),
+        BotCommand("sec14_run", "Day 14 MVP: security loop для внешнего проекта"),
+        BotCommand("sec14_status", "Day 14 MVP: статус последнего прогона"),
+        BotCommand("sec14_report", "Day 14 MVP: краткий отчёт по run"),
     ]
     
     if PR_REVIEW_AVAILABLE:
@@ -4696,6 +4710,9 @@ def run() -> None:
     app.add_handler(CommandHandler("gw_prompt", gw_prompt_cmd))
     app.add_handler(CommandHandler("gw_audit", gw_audit_cmd))
     app.add_handler(CommandHandler("gw_stats", gw_stats_cmd))
+    app.add_handler(CommandHandler("sec14_run", sec14_run_cmd))
+    app.add_handler(CommandHandler("sec14_status", sec14_status_cmd))
+    app.add_handler(CommandHandler("sec14_report", sec14_report_cmd))
 
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^tictactoe_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
