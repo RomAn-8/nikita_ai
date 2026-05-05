@@ -75,10 +75,14 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
     error_type = type(error).__name__
     error_msg = str(error)
     
-    # Ignore connection errors - they are usually temporary
+    # Ignore transient network errors (PTB wraps httpx exceptions in NetworkError)
     if (
         "ConnectError" in error_type
         or "ReadError" in error_type
+        or "NetworkError" in error_type
+        or "TimedOut" in error_type
+        or "ReadError" in error_msg
+        or "ConnectError" in error_msg
         or "getaddrinfo failed" in error_msg
         or "11001" in error_msg
     ):
