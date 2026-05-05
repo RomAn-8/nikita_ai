@@ -76,9 +76,13 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
     error_msg = str(error)
     
     # Ignore connection errors - they are usually temporary
-    if "ConnectError" in error_type or "getaddrinfo failed" in error_msg or "11001" in error_msg:
+    if (
+        "ConnectError" in error_type
+        or "ReadError" in error_type
+        or "getaddrinfo failed" in error_msg
+        or "11001" in error_msg
+    ):
         logger.warning(f"Connection error (likely temporary): {error_type}: {error_msg}")
-        # Don't show to user - this is a temporary network issue
         return
     
     logger.error(f"Unhandled error: {error}", exc_info=True)
